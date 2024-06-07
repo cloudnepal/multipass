@@ -21,8 +21,6 @@
 #include <multipass/format.h>
 #include <multipass/logging/log.h>
 #include <multipass/memory_size.h>
-#include <multipass/ssh/ssh_session.h>
-#include <multipass/utils.h>
 #include <multipass/vm_status_monitor.h>
 
 #include <shared/linux/backend_utils.h>
@@ -47,7 +45,7 @@ auto instance_mac_addr_for(virDomainPtr domain, const mp::LibvirtWrapper::UPtr& 
     {
         reader.readNext();
 
-        if (reader.name() == "mac")
+        if (reader.name() == QStringLiteral("mac"))
         {
             mac_addr = reader.attributes().value("address").toString().toStdString();
             break;
@@ -105,7 +103,7 @@ auto host_architecture_for(virConnectPtr connection, const mp::LibvirtWrapper::U
     {
         reader.readNext();
 
-        if (reader.name() == "arch")
+        if (reader.name() == QStringLiteral("arch"))
         {
             arch = reader.readElementText().toStdString();
             break;
@@ -255,12 +253,31 @@ void update_max_and_property(virDomainPtr domain_ptr, Updater* fun_ptr, Integer 
         flags &= ~max_flag;
     } while (!twice++); // first set the maximum, then actual
 }
+
+std::string management_ipv4_impl(std::optional<mp::IPAddress>& management_ip,
+                                 const std::string& mac_addr,
+                                 const mp::LibvirtWrapper::UPtr& libvirt_wrapper)
+{
+    if (!management_ip)
+    {
+        auto result = instance_ip_for(mac_addr, libvirt_wrapper);
+        if (result)
+            management_ip.emplace(result.value());
+        else
+            return "UNKNOWN";
+    }
+
+    return management_ip.value().as_string();
+}
 } // namespace
 
-mp::LibVirtVirtualMachine::LibVirtVirtualMachine(const mp::VirtualMachineDescription& desc,
-                                                 const std::string& bridge_name, mp::VMStatusMonitor& monitor,
-                                                 const mp::LibvirtWrapper::UPtr& libvirt_wrapper)
-    : BaseVirtualMachine{desc.vm_name},
+mp::LibVirtVirtualMachine::LibVirtVirtualMachine(const VirtualMachineDescription& desc,
+                                                 const std::string& bridge_name,
+                                                 VMStatusMonitor& monitor,
+                                                 const LibvirtWrapper::UPtr& libvirt_wrapper,
+                                                 const SSHKeyProvider& key_provider,
+                                                 const Path& instance_dir)
+    : BaseVirtualMachine{desc.vm_name, key_provider, instance_dir},
       username{desc.ssh_username},
       desc{desc},
       monitor{&monitor},
@@ -328,38 +345,38 @@ void mp::LibVirtVirtualMachine::start()
     monitor->on_resume();
 }
 
-void mp::LibVirtVirtualMachine::stop()
-{
-    shutdown();
-}
-
 void mp::LibVirtVirtualMachine::shutdown()
 {
     std::unique_lock<decltype(state_mutex)> lock{state_mutex};
     auto domain = domain_by_name_for(vm_name, open_libvirt_connection(libvirt_wrapper).get(), libvirt_wrapper);
     state = refresh_instance_state_for_domain(domain.get(), state, libvirt_wrapper);
-    if (state == State::running || state == State::delayed_shutdown || state == State::unknown)
-    {
-        if (!domain || libvirt_wrapper->virDomainShutdown(domain.get()) == -1)
-        {
-            auto warning_string{
-                fmt::format("Cannot shutdown '{}': {}", vm_name, libvirt_wrapper->virGetLastErrorMessage())};
-            mpl::log(mpl::Level::warning, vm_name, warning_string);
-            throw std::runtime_error(warning_string);
-        }
-
-        state = State::off;
-        update_state();
-    }
-    else if (state == State::starting)
-    {
-        libvirt_wrapper->virDomainDestroy(domain.get());
-        state_wait.wait(lock, [this] { return shutdown_while_starting; });
-        update_state();
-    }
-    else if (state == State::suspended)
+    if (state == State::suspended)
     {
         mpl::log(mpl::Level::info, vm_name, fmt::format("Ignoring shutdown issued while suspended"));
+    }
+    else
+    {
+        drop_ssh_session();
+
+        if (state == State::running || state == State::delayed_shutdown || state == State::unknown)
+        {
+            if (!domain || libvirt_wrapper->virDomainShutdown(domain.get()) == -1)
+            {
+                auto warning_string{
+                    fmt::format("Cannot shutdown '{}': {}", vm_name, libvirt_wrapper->virGetLastErrorMessage())};
+                mpl::log(mpl::Level::warning, vm_name, warning_string);
+                throw std::runtime_error(warning_string);
+            }
+
+            state = State::off;
+            update_state();
+        }
+        else if (state == State::starting)
+        {
+            libvirt_wrapper->virDomainDestroy(domain.get());
+            state_wait.wait(lock, [this] { return shutdown_while_starting; });
+            update_state();
+        }
     }
 
     lock.unlock();
@@ -372,6 +389,7 @@ void mp::LibVirtVirtualMachine::suspend()
     state = refresh_instance_state_for_domain(domain.get(), state, libvirt_wrapper);
     if (state == State::running || state == State::delayed_shutdown)
     {
+        drop_ssh_session();
         if (!domain || libvirt_wrapper->virDomainManagedSave(domain.get(), 0) < 0)
         {
             auto warning_string{
@@ -442,26 +460,12 @@ std::string mp::LibVirtVirtualMachine::ssh_username()
 
 std::string mp::LibVirtVirtualMachine::management_ipv4()
 {
-    if (!management_ip)
-    {
-        auto result = instance_ip_for(mac_addr, libvirt_wrapper);
-        if (result)
-            management_ip.emplace(result.value());
-        else
-            return "UNKNOWN";
-    }
-
-    return management_ip.value().as_string();
+    return management_ipv4_impl(management_ip, mac_addr, libvirt_wrapper);
 }
 
 std::string mp::LibVirtVirtualMachine::ipv6()
 {
     return {};
-}
-
-void mp::LibVirtVirtualMachine::wait_until_ssh_up(std::chrono::milliseconds timeout)
-{
-    mp::utils::wait_until_ssh_up(this, timeout, std::bind(&LibVirtVirtualMachine::ensure_vm_is_running, this));
 }
 
 void mp::LibVirtVirtualMachine::update_state()
@@ -481,7 +485,7 @@ mp::LibVirtVirtualMachine::DomainUPtr mp::LibVirtVirtualMachine::initialize_doma
     if (mac_addr.empty())
         mac_addr = instance_mac_addr_for(domain.get(), libvirt_wrapper);
 
-    management_ipv4(); // To set ip
+    management_ipv4_impl(management_ip, mac_addr, libvirt_wrapper); // To set the IP.
     state = refresh_instance_state_for_domain(domain.get(), state, libvirt_wrapper);
 
     return domain;

@@ -35,6 +35,15 @@ using ServerVariant = std::variant<grpc::ServerReaderWriterInterface<StartReply,
                                    grpc::ServerReaderWriterInterface<MountReply, MountRequest>*,
                                    grpc::ServerReaderWriterInterface<RestartReply, RestartRequest>*>;
 
+class NativeMountNeedsStoppedVMException : public std::runtime_error
+{
+public:
+    NativeMountNeedsStoppedVMException(const std::string& vm_name)
+        : std::runtime_error(fmt::format("Please stop the instance {} before attempting native mounts.", vm_name))
+    {
+    }
+};
+
 class MountHandler : private DisabledCopyMove
 {
 public:
@@ -42,20 +51,25 @@ public:
 
     virtual ~MountHandler() = default;
 
-    void start(ServerVariant server, std::chrono::milliseconds timeout = std::chrono::minutes(5))
+    void activate(ServerVariant server, std::chrono::milliseconds timeout = std::chrono::minutes(5))
     {
         std::lock_guard active_lock{active_mutex};
         if (!is_active())
-            start_impl(server, timeout);
+            activate_impl(server, timeout);
         active = true;
     }
 
-    void stop(bool force = false)
+    void deactivate(bool force = false)
     {
         std::lock_guard active_lock{active_mutex};
         if (is_active())
-            stop_impl(force);
+            deactivate_impl(force);
         active = false;
+    }
+
+    const VMMount& get_mount_spec() const noexcept
+    {
+        return mount_spec;
     }
 
     virtual bool is_active()
@@ -63,11 +77,18 @@ public:
         return active;
     }
 
+    virtual bool is_mount_managed_by_backend()
+    {
+        return false;
+    }
+
 protected:
     MountHandler() = default;
-    MountHandler(VirtualMachine* vm, const SSHKeyProvider* ssh_key_provider, const std::string& target,
-                 const std::string& source)
-        : vm{vm}, ssh_key_provider{ssh_key_provider}, target{target}, source{source}, active{false}
+    MountHandler(VirtualMachine* vm,
+                 const SSHKeyProvider* ssh_key_provider,
+                 VMMount mount_spec,
+                 const std::string& target)
+        : vm{vm}, ssh_key_provider{ssh_key_provider}, mount_spec{std::move(mount_spec)}, target{target}, active{false}
     {
         std::error_code err;
         auto source_status = MP_FILEOPS.status(source, err);
@@ -83,8 +104,8 @@ protected:
             throw std::runtime_error(fmt::format("Mount source path \"{}\" is not readable.", source));
     };
 
-    virtual void start_impl(ServerVariant server, std::chrono::milliseconds timeout) = 0;
-    virtual void stop_impl(bool force) = 0;
+    virtual void activate_impl(ServerVariant server, std::chrono::milliseconds timeout) = 0;
+    virtual void deactivate_impl(bool force) = 0;
 
     template <typename Reply, typename Request>
     static Reply make_reply_from_server(grpc::ServerReaderWriterInterface<Reply, Request>*)
@@ -100,9 +121,9 @@ protected:
 
     VirtualMachine* vm;
     const SSHKeyProvider* ssh_key_provider;
+    const VMMount mount_spec = {};
     const std::string target;
-    const std::string source;
-
+    const std::string& source = mount_spec.source_path;
     bool active;
     std::mutex active_mutex;
 };

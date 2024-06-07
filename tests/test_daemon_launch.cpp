@@ -44,7 +44,6 @@ struct TestDaemonLaunch : public mpt::DaemonTestFixture
         EXPECT_CALL(mock_settings, register_handler).WillRepeatedly(Return(nullptr));
         EXPECT_CALL(mock_settings, unregister_handler).Times(AnyNumber());
         EXPECT_CALL(mock_settings, get(Eq(mp::mounts_key))).WillRepeatedly(Return("true"));
-        EXPECT_CALL(mock_settings, get(Eq(mp::driver_key))).WillRepeatedly(Return("nohk")); // TODO hk migration, remove
     }
 
     mpt::MockPlatform::GuardedMock attr{mpt::MockPlatform::inject<NiceMock>()};
@@ -70,10 +69,10 @@ TEST_F(TestDaemonLaunch, blueprintFoundMountsWorkspaceWithNameOverride)
     auto mock_image_vault = std::make_unique<NiceMock<mpt::MockVMImageVault>>();
     auto mock_blueprint_provider = std::make_unique<NiceMock<mpt::MockVMBlueprintProvider>>();
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, command_line_name));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
 
     EXPECT_CALL(*mock_blueprint_provider, fetch_blueprint_for(_, _, _))
         .WillOnce(
@@ -124,11 +123,11 @@ TEST_F(TestDaemonLaunch, v2BlueprintFoundPropagatesSha)
     auto mock_image_vault = std::make_unique<NiceMock<mpt::MockVMImageVault>>();
     auto mock_blueprint_provider = std::make_unique<NiceMock<mpt::MockVMBlueprintProvider>>();
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, command_line_name));
 
     // The expectation of this test is set in fetch_image_lambda().
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _))
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _))
         .WillOnce(mpt::fetch_image_lambda(release, remote, true));
 
     EXPECT_CALL(*mock_blueprint_provider, fetch_blueprint_for(_, _, _))

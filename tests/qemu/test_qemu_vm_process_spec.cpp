@@ -37,7 +37,7 @@ struct TestQemuVMProcessSpec : public Test
                                              "00:11:22:33:44:55",
                                              {},
                                              "ssh_username",
-                                             {"/path/to/image", "", "", "", "", "", "", {}}, // VMImage
+                                             {"/path/to/image", "", "", "", "", {}}, // VMImage
                                              mp::Path{"/path/to/cloud_init.iso"},
                                              {},
                                              {},
@@ -183,6 +183,6 @@ TEST_F(TestQemuVMProcessSpec, apparmor_profile_not_running_as_snap_correct)
     mp::QemuVMProcessSpec spec(desc, platform_args, mount_args, std::nullopt);
 
     EXPECT_TRUE(spec.apparmor_profile().contains("signal (receive) peer=unconfined"));
-    EXPECT_TRUE(spec.apparmor_profile().contains("/usr/share/{seabios,ovmf,qemu-efi}/* r,"));
+    EXPECT_TRUE(spec.apparmor_profile().contains("/usr{,/local}/share/{seabios,ovmf,qemu,qemu-efi}/* r,"));
     EXPECT_TRUE(spec.apparmor_profile().contains(" /usr/bin/qemu-system-")); // space wanted
 }

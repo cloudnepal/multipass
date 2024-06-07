@@ -20,8 +20,8 @@
 #include <multipass/cloud_init_iso.h>
 #include <multipass/network_interface.h>
 #include <multipass/network_interface_info.h>
-#include <multipass/utils.h>
 #include <multipass/virtual_machine_description.h>
+#include <multipass/yaml_node_utils.h>
 
 namespace mp = multipass;
 namespace mpu = multipass::utils;
@@ -38,6 +38,10 @@ auto find_bridge_with(const NetworkContainer& networks, const std::string& membe
                         });
 }
 } // namespace
+
+const mp::Path mp::BaseVirtualMachineFactory::instances_subdir = "vault/instances";
+
+mp::BaseVirtualMachineFactory::BaseVirtualMachineFactory(const Path& instances_dir) : instances_dir{instances_dir} {};
 
 void mp::BaseVirtualMachineFactory::configure(VirtualMachineDescription& vm_desc)
 {

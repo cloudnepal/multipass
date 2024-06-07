@@ -18,11 +18,13 @@
 #ifndef MULTIPASS_PLATFORM_SHARED_H
 #define MULTIPASS_PLATFORM_SHARED_H
 
-#include <QString>
+#include <string>
+#include <unordered_set>
 
 namespace multipass::platform
 {
-QString interpret_hotkey(const QString& val);
+const std::unordered_set<std::string>
+    supported_snapcraft_aliases{"core18", "18.04", "core20", "20.04", "core22", "22.04", "devel"};
 } // namespace multipass::platform
 
 #endif // MULTIPASS_PLATFORM_SHARED_H

@@ -18,13 +18,13 @@
 #ifndef MULTIPASS_JOURNALD_LOGGER_H
 #define MULTIPASS_JOURNALD_LOGGER_H
 
-#include <multipass/logging/logger.h>
+#include "linux_logger.h"
 
 namespace multipass
 {
 namespace logging
 {
-class JournaldLogger : public Logger
+class JournaldLogger : public LinuxLogger
 {
 public:
     explicit JournaldLogger(Level level);

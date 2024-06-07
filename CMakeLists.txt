@@ -15,14 +15,47 @@
 cmake_minimum_required(VERSION 3.17)
 cmake_policy(SET CMP0079 NEW) # Allow target_link_libraries() in subdirs
 
-if (APPLE)
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "10.12") # needs to be set before "project"
-  set(OPENSSL_ROOT_DIR "/usr/local/opt/openssl")
+cmake_host_system_information(RESULT HOST_OS_NAME QUERY OS_NAME)
+
+if("${HOST_OS_NAME}" STREQUAL "macOS")
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0") # needs to be set before "project"
+  set(VCPKG_HOST_OS "osx")
+elseif("${HOST_OS_NAME}" STREQUAL "Windows")
+  set(VCPKG_HOST_OS "windows-static-md")
+else()
+  set(VCPKG_HOST_OS "linux")
 endif()
+
+# Use ccache if it's installed
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+  set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+  set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+endif()
+
+if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
+  set(VCPKG_BUILD_DEFAULT TRUE)
+endif()
+
+if(NOT DEFINED VCPKG_BUILD_DEFAULT)
+  cmake_host_system_information(RESULT VCPKG_HOST_ARCH QUERY OS_PLATFORM)
+  if("${VCPKG_HOST_ARCH}" STREQUAL "x86_64" OR "${VCPKG_HOST_ARCH}" STREQUAL "AMD64")
+    set(VCPKG_HOST_ARCH "x64")
+  elseif("${VCPKG_HOST_ARCH}" STREQUAL "aarch64")
+    set(VCPKG_HOST_ARCH "arm64")
+  endif()
+
+  set(VCPKG_HOST_TRIPLET "${VCPKG_HOST_ARCH}-${VCPKG_HOST_OS}-release")
+  set(VCPKG_TARGET_TRIPLET "${VCPKG_HOST_ARCH}-${VCPKG_HOST_OS}-release")
+endif()
+
+set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/3rd-party/vcpkg/scripts/buildsystems/vcpkg.cmake"
+  CACHE STRING "Vcpkg toolchain file")
 
 project(Multipass)
 
 option(MULTIPASS_ENABLE_TESTS "Build tests" ON)
+option(MULTIPASS_ENABLE_FLUTTER_GUI "Build Flutter GUI" ON)
 
 include(GNUInstallDirs)
 
@@ -30,6 +63,11 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+
+if(MULTIPASS_ENABLE_FLUTTER_GUI)
+  find_program(FLUTTER_EXECUTABLE flutter HINTS /snap/bin/ /bin/ /usr/bin/ REQUIRED DOC "The Flutter executable")
+  find_program(DART_EXECUTABLE dart HINTS /snap/bin/ /bin/ /usr/bin/ REQUIRED DOC "The Dart executable")
+endif(MULTIPASS_ENABLE_FLUTTER_GUI)
 
 string(TOLOWER "${CMAKE_BUILD_TYPE}" cmake_build_type_lower)
 
@@ -66,11 +104,17 @@ endif()
 # OpenSSL config
 find_package(OpenSSL REQUIRED)
 
+# gRPC config
+find_package(gRPC CONFIG REQUIRED)
+
 # Needs to be here before we set further compilation options
 add_subdirectory(3rd-party)
 
 # Qt config
-find_package(Qt5 COMPONENTS Core Network Widgets REQUIRED)
+find_package(Qt6 COMPONENTS Core Concurrent Network REQUIRED)
+
+# POCO config
+find_package(Poco REQUIRED COMPONENTS Foundation Zip)
 
 function(determine_version OUTPUT_VARIABLE)
   # use upstream repo as the authoritative reference when checking for release status
@@ -104,7 +148,7 @@ function(determine_version OUTPUT_VARIABLE)
                       OUTPUT_STRIP_TRAILING_WHITESPACE
                       ERROR_QUIET)
 
-      execute_process(COMMAND git describe --tags --match *-rc --abbrev=0
+      execute_process(COMMAND git describe --tags --match *-rc[0-9]* --abbrev=0
                       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
                       OUTPUT_VARIABLE GIT_TAG
                       OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -211,12 +255,20 @@ if(cmake_build_type_lower MATCHES "coverage")
     message(STATUS
       "Coverage enabled, use the 'covreport' target."
     )
+    execute_process(COMMAND ${LCOV} --version
+                    OUTPUT_VARIABLE LCOV_VERSION_RAW)
+    string(REGEX REPLACE "lcov: LCOV version " "" LCOV_VERSION_STR "${LCOV_VERSION_RAW}")
+    string(REGEX REPLACE "\\..*" "" LCOV_VERSION_MAJOR "${LCOV_VERSION_STR}")
+    if(${LCOV_VERSION_MAJOR} GREATER_EQUAL 2)
+      set(LCOV_IGNORE_ERRORS --ignore-errors mismatch --ignore-errors negative)
+    endif()
+
     add_custom_target(covreport
       DEPENDS multipass_tests
       WORKING_DIRECTORY ${CMAKE_BUILD_DIR}
       COMMAND ${LCOV} --directory . --zerocounters
       COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target test
-      COMMAND ${LCOV} --directory . --capture --output-file coverage.info
+      COMMAND ${LCOV} --directory . --capture --output-file coverage.info ${LCOV_IGNORE_ERRORS}
       COMMAND ${LCOV}
         --remove coverage.info
         '/usr/*'

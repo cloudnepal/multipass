@@ -39,7 +39,12 @@
 #define QEMU_ENABLED 0
 #endif
 
+#ifdef MULTIPASS_JOURNALD_ENABLED
 #include "logger/journald_logger.h"
+#else
+#include "logger/syslog_logger.h"
+#endif
+
 #include "platform_linux_detail.h"
 #include "platform_shared.h"
 #include "shared/linux/process_factory.h"
@@ -66,7 +71,6 @@ namespace mu = multipass::utils;
 
 namespace
 {
-constexpr auto autostart_filename = "multipass.gui.autostart.desktop";
 constexpr auto category = "Linux platform";
 
 // Fetch the ARP protocol HARDWARE identifier.
@@ -201,7 +205,7 @@ std::pair<QString, QString> multipass::platform::detail::parse_os_release(const 
 
     for (const QString& line : os_data)
     {
-        QStringList split = line.split('=', QString::KeepEmptyParts);
+        QStringList split = line.split('=', Qt::KeepEmptyParts);
         if (split.length() == 2 && split[1].length() > 2) // Check for at least 1 char between quotes.
         {
             if (split[0] == id_field)
@@ -251,6 +255,11 @@ QString mp::platform::Platform::get_blueprints_url_override() const
 
 bool mp::platform::Platform::is_alias_supported(const std::string& alias, const std::string& remote) const
 {
+    if (remote == mp::snapcraft_remote)
+    {
+        return supported_snapcraft_aliases.find(alias) != supported_snapcraft_aliases.end();
+    }
+
     return true;
 }
 
@@ -372,9 +381,6 @@ auto mp::platform::detail::get_network_interfaces_from(const QDir& sys_dir)
 
 QString mp::platform::interpret_setting(const QString& key, const QString& val)
 {
-    if (key == hotkey_key)
-        return mp::platform::interpret_hotkey(val);
-
     // this should not happen (settings should have found it to be an invalid key)
     throw InvalidSettingException(key, val, "Setting unavailable on Linux");
 }
@@ -382,18 +388,6 @@ QString mp::platform::interpret_setting(const QString& key, const QString& val)
 void mp::platform::sync_winterm_profiles()
 {
     // NOOP on Linux
-}
-
-QString mp::platform::autostart_test_data()
-{
-    return autostart_filename;
-}
-
-void mp::platform::setup_gui_autostart_prerequisites()
-{
-    const auto config_dir = QDir{MP_STDPATHS.writableLocation(StandardPaths::GenericConfigLocation)};
-    const auto link_dir = QDir{config_dir.absoluteFilePath("autostart")};
-    mu::link_autostart_file(link_dir, mp::client_name, autostart_filename);
 }
 
 std::string mp::platform::default_server_address()
@@ -446,7 +440,11 @@ mp::UpdatePrompt::UPtr mp::platform::make_update_prompt()
 
 mp::logging::Logger::UPtr mp::platform::make_logger(mp::logging::Level level)
 {
+#if MULTIPASS_JOURNALD_ENABLED
     return std::make_unique<logging::JournaldLogger>(level);
+#else
+    return std::make_unique<logging::SyslogLogger>(level);
+#endif
 }
 
 std::string mp::platform::reinterpret_interface_id(const std::string& ux_id)

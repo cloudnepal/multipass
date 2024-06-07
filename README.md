@@ -2,7 +2,7 @@
 
 Multipass is a lightweight VM manager for Linux, Windows and macOS. It's designed
 for developers who want a fresh Ubuntu environment with a single command. It uses
-KVM on Linux, Hyper-V on Windows and HyperKit on macOS to run the VM with minimal
+KVM on Linux, Hyper-V on Windows and QEMU on macOS to run the VM with minimal
 overhead. It can also use VirtualBox on Windows and macOS.
 Multipass will fetch images for you and keep them up to date.
 
@@ -162,8 +162,8 @@ First, install multipass's runtime dependencies. On amd64 architecture, you can 
 
 ```
 sudo apt update
-sudo apt install libgl1 libpng16-16 libqt5core5a libqt5gui5 \
-    libqt5network5 libqt5widgets5 libxml2 libvirt0 dnsmasq-base \
+sudo apt install libgl1 libpng16-16 libqt6core6 libqt6gui6 \
+    libqt6network6 libqt6widgets6 libxml2 libvirt0 dnsmasq-base \
     dnsmasq-utils qemu-system-x86 qemu-utils libslang2 iproute2 \
     iptables iputils-ping libatm1 libxtables12 xterm
 ```
@@ -190,7 +190,7 @@ Finally, use multipass's clients:
 
 ```
 <multipass>/build/bin/multipass launch --name foo  # CLI client
-<multipass>/build/bin/multipass.gui                # GUI client
+<multipass>/build/bin/multipass.gui        # GUI client
 ```
 
 # More information

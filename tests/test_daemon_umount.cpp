@@ -89,13 +89,13 @@ TEST_F(TestDaemonUmount, noTargetsUnmountsAll)
     auto mock_mount_handler2 = std::make_unique<mpt::MockMountHandler>();
     EXPECT_CALL(*mock_mount_handler, is_active).WillOnce(Return(true));
     EXPECT_CALL(*mock_mount_handler2, is_active).WillOnce(Return(true));
-    EXPECT_CALL(*mock_mount_handler, stop_impl(false));
-    EXPECT_CALL(*mock_mount_handler2, stop_impl(false));
+    EXPECT_CALL(*mock_mount_handler, deactivate_impl(false));
+    EXPECT_CALL(*mock_mount_handler2, deactivate_impl(false));
 
     auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_vm, make_native_mount_handler(_, fake_target_path, _))
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path, _))
         .WillOnce(Return(std::move(mock_mount_handler)));
-    EXPECT_CALL(*mock_vm, make_native_mount_handler(_, fake_target_path + "2", _))
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path + "2", _))
         .WillOnce(Return(std::move(mock_mount_handler2)));
 
     EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
@@ -128,16 +128,16 @@ TEST_F(TestDaemonUmount, umountWithTargetOnlyStopsItsHandlers)
     EXPECT_CALL(*mock_mount_handler, is_active).WillOnce(Return(true));
     EXPECT_CALL(*mock_mount_handler2, is_active).Times(0);
     EXPECT_CALL(*mock_mount_handler3, is_active).WillOnce(Return(true));
-    EXPECT_CALL(*mock_mount_handler, stop_impl(false));
-    EXPECT_CALL(*mock_mount_handler2, stop_impl(false)).Times(0);
-    EXPECT_CALL(*mock_mount_handler3, stop_impl(false));
+    EXPECT_CALL(*mock_mount_handler, deactivate_impl(false));
+    EXPECT_CALL(*mock_mount_handler2, deactivate_impl(false)).Times(0);
+    EXPECT_CALL(*mock_mount_handler3, deactivate_impl(false));
 
     auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_vm, make_native_mount_handler(_, fake_target_path, _))
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path, _))
         .WillOnce(Return(std::move(mock_mount_handler)));
-    EXPECT_CALL(*mock_vm, make_native_mount_handler(_, fake_target_path + "2", _))
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path + "2", _))
         .WillOnce(Return(std::move(mock_mount_handler2)));
-    EXPECT_CALL(*mock_vm, make_native_mount_handler(_, fake_target_path + "3", _))
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path + "3", _))
         .WillOnce(Return(std::move(mock_mount_handler3)));
 
     EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
@@ -192,10 +192,10 @@ TEST_F(TestDaemonUmount, stoppingMountFails)
     auto error = "device is busy";
     auto mock_mount_handler = std::make_unique<mpt::MockMountHandler>();
     EXPECT_CALL(*mock_mount_handler, is_active).WillOnce(Return(true));
-    EXPECT_CALL(*mock_mount_handler, stop_impl(false)).WillOnce(Throw(std::runtime_error{error}));
+    EXPECT_CALL(*mock_mount_handler, deactivate_impl(false)).WillOnce(Throw(std::runtime_error{error}));
 
     auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_vm, make_native_mount_handler(_, fake_target_path, _))
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path, _))
         .WillOnce(Return(std::move(mock_mount_handler)));
 
     EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));

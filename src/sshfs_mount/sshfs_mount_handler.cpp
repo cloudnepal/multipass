@@ -15,7 +15,7 @@
  *
  */
 
-#include <multipass/exceptions/exitless_sshprocess_exception.h>
+#include <multipass/exceptions/exitless_sshprocess_exceptions.h>
 #include <multipass/exceptions/sshfs_missing_error.h>
 #include <multipass/platform.h>
 #include <multipass/sshfs_mount/sshfs_mount_handler.h>
@@ -68,7 +68,7 @@ bool has_sshfs(const std::string& name, mp::SSHSession& session)
     }
 
     // Check if multipass-sshfs is already installed
-    if (session.exec("sudo snap list multipass-sshfs").exit_code() == 0)
+    if (session.exec("sudo snap list multipass-sshfs").exit_code(std::chrono::seconds(15)) == 0)
     {
         mpl::log(mpl::Level::debug, category,
                  fmt::format("The multipass-sshfs snap is already installed on '{}'", name));
@@ -97,44 +97,55 @@ try
     if (proc.exit_code(timeout) != 0)
     {
         auto error_msg = proc.read_std_error();
-        mpl::log(mpl::Level::warning, category,
+        mpl::log(mpl::Level::error,
+                 category,
                  fmt::format("Failed to install 'multipass-sshfs': {}", mpu::trim_end(error_msg)));
         throw mp::SSHFSMissingError();
     }
 }
-catch (const mp::ExitlessSSHProcessException&)
+catch (const mp::ExitlessSSHProcessException& e)
 {
-    mpl::log(mpl::Level::info, category, fmt::format("Timeout while installing 'multipass-sshfs' in '{}'", name));
+    mpl::log(mpl::Level::error,
+             category,
+             fmt::format("Could not install 'multipass-sshfs' in '{}': {}", name, e.what()));
     throw mp::SSHFSMissingError();
 }
 } // namespace
 
 namespace multipass
 {
-SSHFSMountHandler::SSHFSMountHandler(VirtualMachine* vm, const SSHKeyProvider* ssh_key_provider,
-                                     const std::string& target, const VMMount& mount)
-    : MountHandler{vm, ssh_key_provider, target, mount.source_path},
+SSHFSMountHandler::SSHFSMountHandler(VirtualMachine* vm,
+                                     const SSHKeyProvider* ssh_key_provider,
+                                     const std::string& target,
+                                     VMMount mount_spec)
+    : MountHandler{vm, ssh_key_provider, std::move(mount_spec), target},
       process{nullptr},
       config{"",
              0,
              vm->ssh_username(),
              vm->vm_name,
              ssh_key_provider->private_key_as_base64(),
-             mount.source_path,
+             source,
              target,
-             mount.gid_mappings,
-             mount.uid_mappings}
+             this->mount_spec.gid_mappings,
+             this->mount_spec.uid_mappings}
 {
-    mpl::log(mpl::Level::info, category,
-             fmt::format("initializing mount {} => {} in '{}'", mount.source_path, target, vm->vm_name));
+    mpl::log(mpl::Level::info,
+             category,
+             fmt::format("initializing mount {} => {} in '{}'", this->mount_spec.source_path, target, vm->vm_name));
 }
 
 bool SSHFSMountHandler::is_active()
 try
 {
-    return active && process && process->running() &&
-           !SSHSession{vm->ssh_hostname(), vm->ssh_port(), vm->ssh_username(), *ssh_key_provider}
-                .exec(fmt::format("findmnt --type fuse.sshfs | grep '{} :{}'", target, source))
+    if (!active || !process || !process->running())
+        return false;
+
+    SSHSession session{vm->ssh_hostname(), vm->ssh_port(), vm->ssh_username(), *ssh_key_provider};
+
+    const auto resolved_target = mp::utils::get_resolved_target(session, target);
+
+    return !session.exec(fmt::format("findmnt --type fuse.sshfs | grep -E '^{} +:{}'", resolved_target, source))
                 .exit_code();
 }
 catch (const std::exception& e)
@@ -144,7 +155,7 @@ catch (const std::exception& e)
     return false;
 }
 
-void SSHFSMountHandler::start_impl(ServerVariant server, std::chrono::milliseconds timeout)
+void SSHFSMountHandler::activate_impl(ServerVariant server, std::chrono::milliseconds timeout)
 {
     SSHSession session{vm->ssh_hostname(), vm->ssh_port(), vm->ssh_username(), *ssh_key_provider};
     if (!has_sshfs(vm->vm_name, session))
@@ -209,7 +220,7 @@ void SSHFSMountHandler::start_impl(ServerVariant server, std::chrono::millisecon
             fmt::format("{}: {}", process_state.failure_message(), process->read_all_standard_error()));
 }
 
-void SSHFSMountHandler::stop_impl(bool force)
+void SSHFSMountHandler::deactivate_impl(bool force)
 {
     mpl::log(mpl::Level::info, category, fmt::format("Stopping mount \"{}\" in instance '{}'", target, vm->vm_name));
     QObject::disconnect(process.get(), &Process::error_occurred, nullptr, nullptr);
@@ -228,6 +239,6 @@ void SSHFSMountHandler::stop_impl(bool force)
 
 SSHFSMountHandler::~SSHFSMountHandler()
 {
-    stop(/*force=*/true);
+    deactivate(/*force=*/true);
 }
 } // namespace multipass

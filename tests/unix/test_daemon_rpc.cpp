@@ -79,7 +79,18 @@ struct TestDaemonRpc : public mpt::DaemonTestFixture
         return mpt::MockDaemon(config_builder.build());
     }
 
-    std::unique_ptr<mpt::MockCertProvider> mock_cert_provider{std::make_unique<mpt::MockCertProvider>()};
+    void mock_empty_list_reply(mpt::MockDaemon& mock_daemon)
+    {
+        EXPECT_CALL(mock_daemon, list(_, _, _)).WillOnce([](auto, auto* server, auto* status_promise) {
+            mp::ListReply reply;
+            reply.mutable_instance_list();
+            server->Write(reply);
+            status_promise->set_value(grpc::Status::OK);
+        });
+    }
+
+    std::unique_ptr<NiceMock<mpt::MockCertProvider>> mock_cert_provider{
+        std::make_unique<NiceMock<mpt::MockCertProvider>>()};
     std::unique_ptr<mpt::MockCertStore> mock_cert_store{std::make_unique<mpt::MockCertStore>()};
 
     mpt::MockPlatform::GuardedMock platform_attr{mpt::MockPlatform::inject()};
@@ -202,9 +213,7 @@ TEST_F(TestDaemonRpc, listCertExistsCompletesSuccesfully)
     EXPECT_CALL(*mock_cert_store, verify_cert(StrEq(mpt::client_cert))).WillOnce(Return(true));
 
     mpt::MockDaemon daemon{make_secure_server()};
-    EXPECT_CALL(daemon, list(_, _, _)).WillOnce([](auto, auto, auto* status_promise) {
-        status_promise->set_value(grpc::Status::OK);
-    });
+    mock_empty_list_reply(daemon);
 
     send_command({"list"});
 }
@@ -218,9 +227,7 @@ TEST_F(TestDaemonRpc, listNoCertsExistWillVerifyAndComplete)
     EXPECT_CALL(*mock_cert_store, add_cert(StrEq(mpt::client_cert))).Times(1);
 
     mpt::MockDaemon daemon{make_secure_server()};
-    EXPECT_CALL(daemon, list(_, _, _)).WillOnce([](auto, auto, auto* status_promise) {
-        status_promise->set_value(grpc::Status::OK);
-    });
+    mock_empty_list_reply(daemon);
 
     send_command({"list"});
 }
@@ -302,9 +309,7 @@ TEST_F(TestDaemonRpc, listSettingServerPermissionsFailLogsErrorAndExits)
     logger_scope.mock_logger->expect_log(mpl::Level::error, error_msg);
     logger_scope.mock_logger->expect_log(mpl::Level::error, "Failed to set up autostart prerequisites", AnyNumber());
 
-    EXPECT_CALL(daemon, list(_, _, _)).WillOnce([](auto, auto, auto* status_promise) {
-        status_promise->set_value(grpc::Status::OK);
-    });
+    mock_empty_list_reply(daemon);
 
     send_command({"list"});
 }

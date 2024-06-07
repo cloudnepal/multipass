@@ -22,6 +22,7 @@
 
 #include <shared/base_virtual_machine.h>
 
+#include <multipass/network_interface.h>
 #include <multipass/process/process.h>
 #include <multipass/virtual_machine_description.h>
 
@@ -41,11 +42,14 @@ class QemuVirtualMachine : public QObject, public BaseVirtualMachine
 public:
     using MountArgs = std::unordered_map<std::string, std::pair<std::string, QStringList>>;
 
-    QemuVirtualMachine(const VirtualMachineDescription& desc, QemuPlatform* qemu_platform, VMStatusMonitor& monitor);
+    QemuVirtualMachine(const VirtualMachineDescription& desc,
+                       QemuPlatform* qemu_platform,
+                       VMStatusMonitor& monitor,
+                       const SSHKeyProvider& key_provider,
+                       const Path& instance_dir);
     ~QemuVirtualMachine();
 
     void start() override;
-    void stop() override;
     void shutdown() override;
     void suspend() override;
     State current_state() override;
@@ -60,18 +64,31 @@ public:
     void update_cpus(int num_cores) override;
     void resize_memory(const MemorySize& new_size) override;
     void resize_disk(const MemorySize& new_size) override;
+    virtual void add_network_interface(int index,
+                                       const std::string& default_mac_addr,
+                                       const NetworkInterface& extra_interface) override;
     virtual MountArgs& modifiable_mount_args();
-    std::unique_ptr<MountHandler> make_native_mount_handler(const SSHKeyProvider* ssh_key_provider,
-                                                            const std::string& target, const VMMount& mount) override;
+    std::unique_ptr<MountHandler> make_native_mount_handler(const std::string& target, const VMMount& mount) override;
 
 signals:
     void on_delete_memory_snapshot();
     void on_reset_network();
+    void on_synchronize_clock();
 
 protected:
-    QemuVirtualMachine(const std::string& name) : BaseVirtualMachine{name}
+    // TODO remove this, the onus of composing a VM of stubs should be on the stub VMs
+    QemuVirtualMachine(const std::string& name, const SSHKeyProvider& key_provider, const Path& instance_dir)
+        : BaseVirtualMachine{name, key_provider, instance_dir}
     {
     }
+
+    void require_snapshots_support() const override;
+    std::shared_ptr<Snapshot> make_specific_snapshot(const QString& filename) override;
+    std::shared_ptr<Snapshot> make_specific_snapshot(const std::string& snapshot_name,
+                                                     const std::string& comment,
+                                                     const std::string& instance_id,
+                                                     const VMSpecs& specs,
+                                                     std::shared_ptr<Snapshot> parent) override;
 
 private:
     void on_started();
@@ -94,5 +111,9 @@ private:
     std::chrono::steady_clock::time_point network_deadline;
 };
 } // namespace multipass
+
+inline void multipass::QemuVirtualMachine::require_snapshots_support() const
+{
+}
 
 #endif // MULTIPASS_QEMU_VIRTUAL_MACHINE_H

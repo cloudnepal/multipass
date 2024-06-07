@@ -28,11 +28,15 @@ namespace test
 {
 struct StubVMImageVault final : public multipass::VMImageVault
 {
-    multipass::VMImage fetch_image(const multipass::FetchType&, const multipass::Query&, const PrepareAction& prepare,
-                                   const multipass::ProgressMonitor&, const bool,
-                                   const std::optional<std::string>&) override
+    multipass::VMImage fetch_image(const multipass::FetchType&,
+                                   const multipass::Query&,
+                                   const PrepareAction& prepare,
+                                   const multipass::ProgressMonitor&,
+                                   const bool,
+                                   const std::optional<std::string>&,
+                                   const multipass::Path&) override
     {
-        return prepare({dummy_image.name(), dummy_image.name(), dummy_image.name(), {}, {}, {}, {}, {}});
+        return prepare({dummy_image.name(), {}, {}, {}, {}, {}});
     };
 
     void remove(const std::string&) override{};

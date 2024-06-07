@@ -50,7 +50,7 @@ public:
         return {};
     };
     virtual QStringList vm_platform_args(const VirtualMachineDescription& vm_desc) = 0;
-    virtual QString get_directory_name()
+    virtual QString get_directory_name() const
     {
         return {};
     };
@@ -58,6 +58,7 @@ public:
     {
         throw NotImplementedOnThisBackendException("networks");
     };
+    virtual void add_network_interface(VirtualMachineDescription& desc, const NetworkInterface& extra_interface) = 0;
 
 protected:
     explicit QemuPlatform() = default;

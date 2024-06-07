@@ -14,12 +14,9 @@
 [submodule "3rd-party/scope_guard"]
 	path = 3rd-party/scope_guard
 	url = https://github.com/ricab/scope_guard.git
-[submodule "3rd-party/qhotkey"]
-	path = 3rd-party/qhotkey/QHotkey
-	url = https://github.com/Skycoder42/QHotkey.git
 [submodule "3rd-party/fmt"]
 	path = 3rd-party/fmt
 	url = https://github.com/fmtlib/fmt.git
-[submodule "3rd-party/poco"]
-	path = 3rd-party/poco
-	url = https://github.com/pocoproject/poco.git
+[submodule "3rd-party/vcpkg"]
+	path = 3rd-party/vcpkg
+	url = https://github.com/microsoft/vcpkg

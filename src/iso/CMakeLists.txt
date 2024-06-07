@@ -18,4 +18,6 @@ add_library(iso STATIC
   cloud_init_iso.cpp)
 
 target_link_libraries(iso
-  Qt5::Core)
+  fmt
+  utils
+  Qt6::Core)

@@ -20,11 +20,12 @@
 #include "daemon_test_fixture.h"
 #include "dummy_ssh_key_provider.h"
 #include "fake_alias_config.h"
-#include "json_utils.h"
+#include "json_test_utils.h"
 #include "mock_daemon.h"
 #include "mock_environment_helpers.h"
 #include "mock_file_ops.h"
 #include "mock_image_host.h"
+#include "mock_json_utils.h"
 #include "mock_logger.h"
 #include "mock_platform.h"
 #include "mock_server_reader_writer.h"
@@ -40,6 +41,7 @@
 #include "tracking_url_downloader.h"
 
 #include <src/daemon/default_vm_image_vault.h>
+#include <src/daemon/instance_settings_handler.h>
 
 #include <multipass/constants.h>
 #include <multipass/default_vm_blueprint_provider.h>
@@ -88,6 +90,8 @@ namespace
 {
 const qint64 default_total_bytes{16'106'127'360}; // 15G
 
+const std::string csv_header{"Alias,Instance,Command,Working directory,Context\n"};
+
 struct StubNameGenerator : public mp::NameGenerator
 {
     explicit StubNameGenerator(std::string name) : name{std::move(name)}
@@ -123,7 +127,7 @@ struct Daemon : public mpt::DaemonTestFixture
         EXPECT_CALL(mock_settings, get(Eq(mp::mounts_key))).WillRepeatedly(Return("true")); /* TODO should probably add
                              a few more tests for `false`, since there are different portions of code depending on it */
         EXPECT_CALL(mock_settings, get(Eq(mp::winterm_key))).WillRepeatedly(Return("none"));
-        EXPECT_CALL(mock_settings, get(Eq(mp::driver_key))).WillRepeatedly(Return("nohk")); // TODO hk migration, remove
+        EXPECT_CALL(mock_settings, get(Eq(mp::bridged_interface_key))).WillRepeatedly(Return("eth8"));
     }
 
     mpt::MockUtils::GuardedMock mock_utils_injection{mpt::MockUtils::inject<NiceMock>()};
@@ -158,8 +162,15 @@ TEST_F(Daemon, receives_commands_and_calls_corresponding_slot)
         .WillOnce(Invoke(&daemon, &mpt::MockDaemon::set_promise_value<mp::SSHInfoRequest, mp::SSHInfoReply>));
     EXPECT_CALL(daemon, info(_, _, _))
         .WillOnce(Invoke(&daemon, &mpt::MockDaemon::set_promise_value<mp::InfoRequest, mp::InfoReply>));
-    EXPECT_CALL(daemon, list(_, _, _))
-        .WillOnce(Invoke(&daemon, &mpt::MockDaemon::set_promise_value<mp::ListRequest, mp::ListReply>));
+    EXPECT_CALL(daemon, list(_, _, _)).WillOnce([](auto, auto server, auto status_promise) {
+        mp::ListReply reply;
+        reply.mutable_instance_list();
+
+        server->Write(reply);
+        status_promise->set_value(grpc::Status::OK);
+
+        return grpc::Status{};
+    });
     EXPECT_CALL(daemon, recover(_, _, _))
         .WillOnce(Invoke(&daemon, &mpt::MockDaemon::set_promise_value<mp::RecoverRequest, mp::RecoverReply>));
     EXPECT_CALL(daemon, start(_, _, _))
@@ -180,6 +191,10 @@ TEST_F(Daemon, receives_commands_and_calls_corresponding_slot)
         .WillOnce(Invoke(&daemon, &mpt::MockDaemon::set_promise_value<mp::UmountRequest, mp::UmountReply>));
     EXPECT_CALL(daemon, networks(_, _, _))
         .WillOnce(Invoke(&daemon, &mpt::MockDaemon::set_promise_value<mp::NetworksRequest, mp::NetworksReply>));
+    EXPECT_CALL(daemon, snapshot)
+        .WillOnce(Invoke(&daemon, &mpt::MockDaemon::set_promise_value<mp::SnapshotRequest, mp::SnapshotReply>));
+    EXPECT_CALL(daemon, restore)
+        .WillOnce(Invoke(&daemon, &mpt::MockDaemon::set_promise_value<mp::RestoreRequest, mp::RestoreReply>));
 
     EXPECT_CALL(mock_settings, get(Eq("foo"))).WillRepeatedly(Return("bar"));
 
@@ -194,10 +209,12 @@ TEST_F(Daemon, receives_commands_and_calls_corresponding_slot)
                    {"list"},
                    {"purge"},
                    {"recover", "foo"},
+                   {"snapshot", "foo"},
                    {"start", "foo"},
                    {"stop", "foo"},
                    {"suspend", "foo"},
                    {"restart", "foo"},
+                   {"restore", "foo.bar"},
                    {"version"},
                    {"find", "something"},
                    {"mount", ".", "target"},
@@ -249,6 +266,18 @@ TEST_F(Daemon, proxy_contains_valid_info)
     EXPECT_THAT(config->network_proxy->password(), password);
     EXPECT_THAT(config->network_proxy->hostName(), hostname);
     EXPECT_THAT(config->network_proxy->port(), port);
+}
+
+TEST_F(Daemon, daemonAppliesPermissionsToStorageDirectory)
+{
+    QTemporaryDir storage_dir;
+
+    mpt::SetEnvScope storage(mp::multipass_storage_env_var, storage_dir.path().toUtf8());
+
+    EXPECT_CALL(mock_platform, multipass_storage_location()).WillOnce(Return(mp::utils::get_multipass_storage()));
+    EXPECT_CALL(mock_utils, make_dir(_, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+
+    auto config = config_builder.build();
 }
 
 TEST_F(Daemon, data_path_valid)
@@ -398,7 +427,7 @@ TEST_P(DaemonCreateLaunchTestSuite, creates_virtual_machines)
     auto mock_factory = use_a_mock_vm_factory();
     mp::Daemon daemon{config_builder.build()};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _));
+    EXPECT_CALL(*mock_factory, create_virtual_machine);
     send_command({GetParam()});
 }
 
@@ -652,10 +681,10 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundPassesExpectedAliases)
     const std::string alias_command{"aliascommand"};
     const std::string alias_wdir{"map"};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, name));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
 
     auto alias = std::make_optional(std::make_pair(alias_name, mp::AliasDefinition{name, alias_command, alias_wdir}));
 
@@ -673,8 +702,9 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundPassesExpectedAliases)
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    auto expected_csv_string = alias_name + "," + name + "," + alias_command + "," + alias_wdir + "\n";
-    EXPECT_THAT(cout_stream.str(), HasSubstr(expected_csv_string));
+    auto expected_csv_string =
+        csv_header + alias_name + "," + name + "," + alias_command + "," + alias_wdir + "," + name + "\n";
+    EXPECT_EQ(cout_stream.str(), expected_csv_string);
 }
 
 TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundMountsWorkspace)
@@ -690,10 +720,10 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundMountsWorkspace)
     const std::string remote{"release"};
     const std::string name{"ultimo-blueprint"};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, name));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
 
     EXPECT_CALL(*mock_blueprint_provider, fetch_blueprint_for(_, _, _))
         .WillOnce(
@@ -724,10 +754,10 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundMountsWorkspaceConfined)
     const std::string remote{"release"};
     const std::string name{"ultimo-blueprint"};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, name));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
 
     EXPECT_CALL(*mock_blueprint_provider, fetch_blueprint_for(_, _, _))
         .WillOnce(
@@ -762,10 +792,10 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundMountsWorkspaceInExisting
     const std::string remote{"release"};
     const std::string name{"ultimo-blueprint"};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, name));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
 
     EXPECT_CALL(*mock_blueprint_provider, fetch_blueprint_for(_, _, _))
         .WillOnce(
@@ -805,10 +835,10 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundDoesNotMountUnwrittableWo
     const std::string remote{"release"};
     const std::string name{"ultimo-blueprint"};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, name));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
 
     EXPECT_CALL(*mock_blueprint_provider, fetch_blueprint_for(_, _, _))
         .WillOnce(
@@ -822,7 +852,10 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundDoesNotMountUnwrittableWo
         .WillOnce(Return(temp_dir.path()));
 
     auto [mock_file_ops, guard] = mpt::MockFileOps::inject();
-    EXPECT_CALL(*mock_file_ops, mkpath(_, _)).WillOnce(Return(false));
+    EXPECT_CALL(*mock_file_ops, open(_, _)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mock_file_ops, write(_, _)).WillRepeatedly(Return(1234));
+    EXPECT_CALL(*mock_file_ops, commit(_)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mock_file_ops, mkpath(_, _)).WillOnce(Return(true)).WillOnce(Return(true)).WillOnce(Return(false));
 
     config_builder.blueprint_provider = std::move(mock_blueprint_provider);
     config_builder.vault = std::move(mock_image_vault);
@@ -849,10 +882,10 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundButCannotMount)
     const std::string remote{"release"};
     const std::string name{"ultimo-blueprint"};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, name));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
 
     EXPECT_CALL(*mock_blueprint_provider, fetch_blueprint_for(_, _, _))
         .WillOnce(
@@ -866,7 +899,10 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundButCannotMount)
         .WillOnce(Return(temp_dir.path()));
 
     auto [mock_file_ops, guard] = mpt::MockFileOps::inject();
-    EXPECT_CALL(*mock_file_ops, mkpath(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*mock_file_ops, open(_, _)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mock_file_ops, write(_, _)).WillRepeatedly(Return(1234));
+    EXPECT_CALL(*mock_file_ops, commit(_)).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mock_file_ops, mkpath(_, _)).WillOnce(Return(true)).WillOnce(Return(true)).WillOnce(Return(true));
 
     config_builder.blueprint_provider = std::move(mock_blueprint_provider);
     config_builder.vault = std::move(mock_image_vault);
@@ -897,10 +933,10 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundPassesExpectedAliasesWith
     const std::string alias_command{"aliascommand"};
     const std::string alias_wdir{"map"};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, command_line_name));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
 
     auto alias = std::make_optional(std::make_pair(alias_name, mp::AliasDefinition{name, alias_command, alias_wdir}));
 
@@ -918,8 +954,9 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundPassesExpectedAliasesWith
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    auto expected_csv_string = alias_name + "," + command_line_name + "," + alias_command + "," + alias_wdir + "\n";
-    EXPECT_THAT(cout_stream.str(), HasSubstr(expected_csv_string));
+    auto expected_csv_string = csv_header + alias_name + "," + command_line_name + "," + alias_command + "," +
+                               alias_wdir + "," + command_line_name + "\n";
+    EXPECT_EQ(cout_stream.str(), expected_csv_string);
 }
 
 TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundDoesNotOverwriteAliases)
@@ -940,12 +977,13 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundDoesNotOverwriteAliases)
     const std::string alias_command{"aliascommand"};
     const std::string alias_wdir{"map"};
 
+    // This makes the alias be defined in the default context. Launching an instance will define it in another context.
     populate_db_file(AliasesVector{{alias_name, {"original_instance", "a_command", "map"}}});
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, name));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
 
     auto alias = std::make_optional(std::make_pair(alias_name, mp::AliasDefinition{name, alias_command, alias_wdir}));
 
@@ -961,13 +999,62 @@ TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundDoesNotOverwriteAliases)
     std::stringstream cout_stream;
     send_command({"launch", name}, cout_stream);
 
-    EXPECT_THAT(cout_stream.str(), HasSubstr("Warning: unable to create alias " + alias_name));
+    cout_stream.str("");
+    send_command({"aliases", "--format=csv"}, cout_stream);
+
+    auto expected_csv_string = csv_header + alias_name + ",original_instance,a_command,map,default*\n" + alias_name +
+                               "," + name + "," + alias_command + "," + alias_wdir + "," + name + "\n";
+    EXPECT_EQ(cout_stream.str(), expected_csv_string);
+}
+
+TEST_F(DaemonCreateLaunchAliasTestSuite, blueprintFoundDoesNotOverwriteAliasesIfClashing)
+{
+    typedef std::vector<std::pair<std::string, mp::AliasDefinition>> AliasesVector;
+
+    auto mock_factory = use_a_mock_vm_factory();
+    auto mock_image_vault = std::make_unique<NiceMock<mpt::MockVMImageVault>>();
+    auto mock_blueprint_provider = std::make_unique<NiceMock<mpt::MockVMBlueprintProvider>>();
+
+    static constexpr int num_cores = 4;
+    const mp::MemorySize mem_size{"4G"};
+    const mp::MemorySize disk_space{"25G"};
+    const std::string release{"focal"};
+    const std::string remote{"release"};
+    const std::string alias_name{"aliasname"};
+    const std::string alias_command{"aliascommand"};
+    const std::string alias_wdir{"map"};
+
+    // The easiest way of creating a clash is to name the instance like the default alias context.
+    const std::string name{"default"};
+
+    populate_db_file(AliasesVector{{alias_name, {"original_instance", "a_command", "map"}}});
+
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
+        .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, name));
+
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+
+    auto alias = std::make_optional(std::make_pair(alias_name, mp::AliasDefinition{name, alias_command, alias_wdir}));
+
+    EXPECT_CALL(*mock_blueprint_provider, fetch_blueprint_for(_, _, _))
+        .WillOnce(mpt::fetch_blueprint_for_lambda(num_cores, mem_size, disk_space, release, remote, alias));
+
+    EXPECT_CALL(*mock_blueprint_provider, name_from_blueprint(_)).WillOnce(Return(name));
+
+    config_builder.blueprint_provider = std::move(mock_blueprint_provider);
+    config_builder.vault = std::move(mock_image_vault);
+    mp::Daemon daemon{config_builder.build()};
+
+    std::stringstream cout_stream, cerr_stream;
+    send_command({"launch", name}, cout_stream, cerr_stream);
+
+    EXPECT_THAT(cerr_stream.str(), HasSubstr("Warning: unable to create alias " + alias_name));
 
     cout_stream.str("");
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    auto expected_csv_string = alias_name + ",original_instance,a_command,map\n";
-    EXPECT_THAT(cout_stream.str(), HasSubstr(expected_csv_string));
+    auto expected_csv_string = csv_header + alias_name + ",original_instance,a_command,map,default*\n";
+    EXPECT_EQ(cout_stream.str(), expected_csv_string);
 }
 
 TEST_P(DaemonCreateLaunchTestSuite, blueprint_found_passes_expected_data)
@@ -983,10 +1070,10 @@ TEST_P(DaemonCreateLaunchTestSuite, blueprint_found_passes_expected_data)
     const std::string remote{"release"};
     const std::string name{"ultimo-blueprint"};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, name));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, remote));
 
     EXPECT_CALL(*mock_blueprint_provider, fetch_blueprint_for(_, _, _))
         .WillOnce(mpt::fetch_blueprint_for_lambda(num_cores, mem_size, disk_space, release, remote));
@@ -1011,10 +1098,10 @@ TEST_P(DaemonCreateLaunchTestSuite, blueprint_not_found_passes_expected_data)
     const std::string empty{};
     const std::string release{"default"};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
         .WillOnce(mpt::create_virtual_machine_lambda(num_cores, mem_size, disk_space, empty));
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, empty));
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).WillOnce(mpt::fetch_image_lambda(release, empty));
 
     config_builder.vault = std::move(mock_image_vault);
     mp::Daemon daemon{config_builder.build()};
@@ -1138,7 +1225,7 @@ TEST_P(MinSpaceRespectedSuite, accepts_launch_with_enough_explicit_memory)
     const auto& opt_name = std::get<1>(param);
     const auto& opt_value = std::get<2>(param);
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _));
+    EXPECT_CALL(*mock_factory, create_virtual_machine);
     send_command({cmd, opt_name, opt_value});
 }
 
@@ -1153,7 +1240,7 @@ TEST_P(MinSpaceViolatedSuite, refuses_launch_with_memory_below_threshold)
     const auto& opt_name = std::get<1>(param);
     const auto& opt_value = std::get<2>(param);
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).Times(0); // expect *no* call
+    EXPECT_CALL(*mock_factory, create_virtual_machine).Times(0); // expect *no* call
     send_command({cmd, opt_name, opt_value}, trash_stream, stream);
     EXPECT_THAT(stream.str(), AllOf(HasSubstr("fail"), AnyOf(HasSubstr("memory"), HasSubstr("disk"))));
 }
@@ -1184,13 +1271,13 @@ TEST_P(LaunchImgSizeSuite, launches_with_correct_disk_size)
     if (other_command_line_parameters.size() > 0 && mp::MemorySize(other_command_line_parameters[1]) < img_size)
     {
         std::stringstream stream;
-        EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).Times(0);
+        EXPECT_CALL(*mock_factory, create_virtual_machine).Times(0);
         send_command(all_parameters, trash_stream, stream);
         EXPECT_THAT(stream.str(), AllOf(HasSubstr("Requested disk"), HasSubstr("below minimum for this image")));
     }
     else
     {
-        EXPECT_CALL(*mock_factory, create_virtual_machine(_, _));
+        EXPECT_CALL(*mock_factory, create_virtual_machine);
         send_command(all_parameters);
     }
 }
@@ -1208,7 +1295,7 @@ TEST_P(LaunchStorageCheckSuite, launch_warns_when_overcommitting_disk)
     logger_scope.mock_logger->expect_log(mpl::Level::warning,
                                          fmt::format("Reserving more disk space ({} bytes) than available (0 bytes)",
                                                      mp::MemorySize{mp::default_disk_size}.in_bytes()));
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _));
+    EXPECT_CALL(*mock_factory, create_virtual_machine);
     send_command({GetParam()});
 }
 
@@ -1227,7 +1314,7 @@ TEST_P(LaunchStorageCheckSuite, launch_fails_when_space_less_than_image)
     EXPECT_CALL(mock_utils, filesystem_bytes_available(_)).WillRepeatedly(Return(0));
 
     std::stringstream stream;
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).Times(0);
+    EXPECT_CALL(*mock_factory, create_virtual_machine).Times(0);
     send_command({GetParam()}, trash_stream, stream);
     EXPECT_THAT(stream.str(), HasSubstr("Available disk (0 bytes) below minimum for this image (1 bytes)"));
 }
@@ -1238,8 +1325,11 @@ TEST_P(LaunchStorageCheckSuite, launch_fails_with_invalid_data_directory)
     config_builder.data_directory = QString("invalid_data_directory");
     mp::Daemon daemon{config_builder.build()};
 
+    auto [mock_json_utils, guard] = mpt::MockJsonUtils::inject<StrictMock>();
+    EXPECT_CALL(*mock_json_utils, write_json).Times(1); // avoid creating directory
+
     std::stringstream stream;
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).Times(0);
+    EXPECT_CALL(*mock_factory, create_virtual_machine).Times(0);
     send_command({GetParam()}, trash_stream, stream);
     EXPECT_THAT(stream.str(), HasSubstr("Failed to determine information about the volume containing"));
 }
@@ -1267,9 +1357,9 @@ TEST_F(DaemonCreateLaunchTestSuite, blueprintFromFileCallsCorrectFunction)
 
     const std::string name{"ultimo-blueprint"};
 
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).Times(1);
+    EXPECT_CALL(*mock_factory, create_virtual_machine).Times(1);
 
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _)).Times(1);
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, _, _, _, _, _, _)).Times(1);
 
     EXPECT_CALL(*mock_blueprint_provider, fetch_blueprint_for(_, _, _)).Times(0);
 
@@ -1334,6 +1424,10 @@ TEST_F(Daemon, reads_mac_addresses_from_json)
 
     const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
 
+    EXPECT_CALL(*use_a_mock_vm_factory(), create_virtual_machine).WillRepeatedly(WithArg<0>([](const auto& desc) {
+        return std::make_unique<mpt::StubVirtualMachine>(desc.vm_name);
+    }));
+
     // Make the daemon look for the JSON on our temporary directory. It will read the contents of the file.
     config_builder.data_directory = temp_dir->path();
     mp::Daemon daemon{config_builder.build()};
@@ -1341,12 +1435,13 @@ TEST_F(Daemon, reads_mac_addresses_from_json)
     // Check that the instance was indeed read and there were no errors.
     {
         StrictMock<mpt::MockServerReaderWriter<mp::ListReply, mp::ListRequest>> mock_server;
+        mp::ListReply list_reply;
 
-        auto instance_matcher = Property(&mp::ListVMInstance::name, "real-zebraphant");
-        EXPECT_CALL(mock_server, Write(Property(&mp::ListReply::instances, ElementsAre(instance_matcher)), _))
-            .WillOnce(Return(true));
+        auto instance_matcher = UnorderedElementsAre(Property(&mp::ListVMInstance::name, "real-zebraphant"));
+        EXPECT_CALL(mock_server, Write(_, _)).WillOnce(DoAll(SaveArg<0>(&list_reply), Return(true)));
 
         EXPECT_TRUE(call_daemon_slot(daemon, &mp::Daemon::list, mp::ListRequest{}, mock_server).ok());
+        EXPECT_THAT(list_reply.instance_list().instances(), instance_matcher);
     }
 
     // Removing the JSON is possible now because data was already read. This step is not necessary, but doing it we
@@ -1396,6 +1491,10 @@ TEST_F(Daemon, writesAndReadsMountsInJson)
 
     const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces, mounts));
 
+    EXPECT_CALL(*use_a_mock_vm_factory(), create_virtual_machine).WillRepeatedly(WithArg<0>([](const auto& desc) {
+        return std::make_unique<mpt::StubVirtualMachine>(desc.vm_name);
+    }));
+
     // Make the daemon look for the JSON on our temporary directory. It will read the contents of the file.
     config_builder.data_directory = temp_dir->path();
     mp::Daemon daemon{config_builder.build()};
@@ -1403,12 +1502,13 @@ TEST_F(Daemon, writesAndReadsMountsInJson)
     // Check that the instance was indeed read and there were no errors.
     {
         StrictMock<mpt::MockServerReaderWriter<mp::ListReply, mp::ListRequest>> mock_server;
+        mp::ListReply list_reply;
 
-        auto instance_matcher = Property(&mp::ListVMInstance::name, "real-zebraphant");
-        EXPECT_CALL(mock_server, Write(Property(&mp::ListReply::instances, ElementsAre(instance_matcher)), _))
-            .WillOnce(Return(true));
+        auto instance_matcher = UnorderedElementsAre(Property(&mp::ListVMInstance::name, "real-zebraphant"));
+        EXPECT_CALL(mock_server, Write(_, _)).WillOnce(DoAll(SaveArg<0>(&list_reply), Return(true)));
 
         EXPECT_TRUE(call_daemon_slot(daemon, &mp::Daemon::list, mp::ListRequest{}, mock_server).ok());
+        EXPECT_THAT(list_reply.instance_list().instances(), instance_matcher);
     }
 
     QFile::remove(filename);    // Remove the JSON.
@@ -1429,6 +1529,10 @@ TEST_F(Daemon, writes_and_reads_ordered_maps_in_json)
 
     const auto [temp_dir, filename] =
         plant_instance_json(fake_json_contents("52:54:00:73:76:29", std::vector<mp::NetworkInterface>{}, mounts));
+
+    EXPECT_CALL(*use_a_mock_vm_factory(), create_virtual_machine).WillRepeatedly(WithArg<0>([](const auto& desc) {
+        return std::make_unique<mpt::StubVirtualMachine>(desc.vm_name);
+    }));
 
     config_builder.data_directory = temp_dir->path();
     mp::Daemon daemon{config_builder.build()};
@@ -1475,7 +1579,7 @@ TEST_F(Daemon, refuses_launch_because_bridging_is_not_implemented)
 
     std::stringstream err_stream;
     send_command({"launch", "--network", "eth0"}, trash_stream, err_stream);
-    EXPECT_THAT(err_stream.str(), HasSubstr("The bridging feature is not implemented on this backend"));
+    EXPECT_THAT(err_stream.str(), HasSubstr("The networks feature is not implemented on this backend"));
 }
 
 TEST_P(RefuseBridging, old_image)
@@ -1560,6 +1664,18 @@ constexpr auto valid_template = R"(
     "ssh_username": "ubuntu",
     "state": 1
 }})";
+constexpr auto deleted_template = R"(
+"{}": {{
+    "deleted": true,
+    "disk_space": "3232323232",
+    "mac_addr": "ab:cd:ef:12:34:{}",
+    "mem_size": "2323232323",
+    "metadata": {{}},
+    "mounts": [],
+    "num_cores": 4,
+    "ssh_username": "ubuntu",
+    "state": 1
+}})";
 
 TEST_F(Daemon, skips_over_instance_ghosts_in_db) // which will have been sometimes writen for purged instances
 {
@@ -1578,8 +1694,10 @@ TEST_F(Daemon, skips_over_instance_ghosts_in_db) // which will have been sometim
     auto mock_factory = use_a_mock_vm_factory();
 
     EXPECT_CALL(*mock_factory, create_virtual_machine).Times(0);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(Field(&mp::VirtualMachineDescription::vm_name, id1), _)).Times(1);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(Field(&mp::VirtualMachineDescription::vm_name, id2), _)).Times(1);
+    EXPECT_CALL(*mock_factory, create_virtual_machine(Field(&mp::VirtualMachineDescription::vm_name, id1), _, _))
+        .Times(1);
+    EXPECT_CALL(*mock_factory, create_virtual_machine(Field(&mp::VirtualMachineDescription::vm_name, id2), _, _))
+        .Times(1);
 
     mp::Daemon daemon{config_builder.build()};
 }
@@ -1607,28 +1725,31 @@ TEST_F(Daemon, ctor_drops_removed_instances)
     config_builder.data_directory = temp_dir->path();
 
     auto mock_image_vault = std::make_unique<NiceMock<mpt::MockVMImageVault>>();
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, Field(&mp::Query::name, stayed), _, _, _, _))
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, Field(&mp::Query::name, stayed), _, _, _, _, _))
         .WillRepeatedly(DoDefault()); // returns an image that can be verified to exist for this instance
-    EXPECT_CALL(*mock_image_vault, fetch_image(_, Field(&mp::Query::name, gone), _, _, _, _))
-        .WillOnce(
-            Return(mp::VMImage{"/path/to/nowhere", "", "", "", "", "", "", {}})); // an image that can't be verified to
-                                                                                  // exist for this instance
+    EXPECT_CALL(*mock_image_vault, fetch_image(_, Field(&mp::Query::name, gone), _, _, _, _, _))
+        .WillOnce(Return(mp::VMImage{"/path/to/nowhere", "", "", "", "", {}})); // an image that can't be verified to
+                                                                                // exist for this instance
     config_builder.vault = std::move(mock_image_vault);
 
     auto mock_factory = use_a_mock_vm_factory();
-    EXPECT_CALL(*mock_factory, create_virtual_machine(Field(&mp::VirtualMachineDescription::vm_name, stayed), _))
-        .Times(1);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(Field(&mp::VirtualMachineDescription::vm_name, gone), _))
+    EXPECT_CALL(*mock_factory, create_virtual_machine(Field(&mp::VirtualMachineDescription::vm_name, stayed), _, _))
+        .Times(1)
+        .WillRepeatedly(
+            WithArg<0>([](const auto& desc) { return std::make_unique<mpt::StubVirtualMachine>(desc.vm_name); }));
+    EXPECT_CALL(*mock_factory, create_virtual_machine(Field(&mp::VirtualMachineDescription::vm_name, gone), _, _))
         .Times(0);
 
     mp::Daemon daemon{config_builder.build()};
 
     StrictMock<mpt::MockServerReaderWriter<mp::ListReply, mp::ListRequest>> mock_server;
-    auto stayed_matcher = Property(&mp::ListVMInstance::name, stayed);
-    EXPECT_CALL(mock_server, Write(Property(&mp::ListReply::instances, ElementsAre(stayed_matcher)), _))
-        .WillOnce(Return(true));
+    mp::ListReply list_reply;
+
+    auto stayed_matcher = UnorderedElementsAre(Property(&mp::ListVMInstance::name, stayed));
+    EXPECT_CALL(mock_server, Write(_, _)).WillOnce(DoAll(SaveArg<0>(&list_reply), Return(true)));
 
     EXPECT_TRUE(call_daemon_slot(daemon, &mp::Daemon::list, mp::ListRequest{}, mock_server).ok());
+    EXPECT_THAT(list_reply.instance_list().instances(), stayed_matcher);
 
     auto updated_json = mpt::load(filename);
     EXPECT_THAT(updated_json.toStdString(), AllOf(HasSubstr(stayed), Not(HasSubstr(gone))));
@@ -1642,7 +1763,7 @@ TEST_P(ListIP, lists_with_ip)
     mp::Daemon daemon{config_builder.build()};
 
     auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>("mock");
-    EXPECT_CALL(*mock_factory, create_virtual_machine).WillRepeatedly([&instance_ptr](const auto&, auto&) {
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillRepeatedly([&instance_ptr](auto&&...) {
         return std::move(instance_ptr);
     });
 
@@ -1650,6 +1771,8 @@ TEST_P(ListIP, lists_with_ip)
 
     EXPECT_CALL(*instance_ptr, current_state()).WillRepeatedly(Return(state));
     EXPECT_CALL(*instance_ptr, ensure_vm_is_running()).WillRepeatedly(Throw(std::runtime_error("Not running")));
+
+    MP_DELEGATE_MOCK_CALLS_ON_BASE(mock_utils, is_running, mp::Utils);
 
     send_command({"launch"});
 
@@ -1715,9 +1838,8 @@ TEST_F(Daemon, does_not_hold_on_to_macs_when_loading_fails)
 
     auto mock_image_vault = std::make_unique<NiceMock<mpt::MockVMImageVault>>();
     EXPECT_CALL(*mock_image_vault, fetch_image)
-        .WillOnce(
-            Return(mp::VMImage{"/path/to/nowhere", "", "", "", "", "", "", {}})) // cause the Daemon's ctor to fail
-                                                                                 // verifying that the img exists
+        .WillOnce(Return(mp::VMImage{"/path/to/nowhere", "", "", "", "", {}})) // cause the Daemon's ctor to fail
+                                                                               // verifying that the img exists
         .WillRepeatedly(DoDefault());
     config_builder.vault = std::move(mock_image_vault);
 
@@ -1726,8 +1848,8 @@ TEST_F(Daemon, does_not_hold_on_to_macs_when_loading_fails)
 
     mp::Daemon daemon{config_builder.build()};
 
-    for (const auto& mac : {mac1, mac2})
-        send_command({"launch", "--network", fmt::format("name=eth0,mac={}", mac)});
+    for (const auto* mac : {&mac1, &mac2})
+        send_command({"launch", "--network", fmt::format("name=eth0,mac={}", *mac)});
 }
 
 TEST_F(Daemon, does_not_hold_on_to_macs_when_image_preparation_fails)
@@ -1768,9 +1890,9 @@ TEST_F(Daemon, releases_macs_of_purged_instances_but_keeps_the_rest)
         return Field(&mp::VirtualMachineDescription::extra_interfaces,
                      Contains(Field(&mp::NetworkInterface::mac_address, mac)));
     };
-    EXPECT_CALL(*mock_factory, create_virtual_machine(mac_matcher(mac1), _)).Times(1);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(mac_matcher(mac2), _)).Times(1);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(mac_matcher(mac3), _)).Times(2); // this one gets reused
+    EXPECT_CALL(*mock_factory, create_virtual_machine(mac_matcher(mac1), _, _)).Times(1);
+    EXPECT_CALL(*mock_factory, create_virtual_machine(mac_matcher(mac2), _, _)).Times(1);
+    EXPECT_CALL(*mock_factory, create_virtual_machine(mac_matcher(mac3), _, _)).Times(2); // this one gets reused
 
     send_command({"launch", "--network", fmt::format("name=eth0,mac={}", mac1), "--name", "vm1"});
     send_command({"launch", "--network", fmt::format("name=eth0,mac={}", mac2), "--name", "vm2"});
@@ -1790,7 +1912,7 @@ TEST_P(DaemonLaunchTimeoutValueTestSuite, uses_correct_launch_timeout)
     auto mock_factory = use_a_mock_vm_factory();
     auto mock_blueprint_provider = std::make_unique<NiceMock<mpt::MockVMBlueprintProvider>>();
     auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>("mock");
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce([&instance_ptr](auto&&...) {
         return std::move(instance_ptr);
     });
 
@@ -1799,13 +1921,13 @@ TEST_P(DaemonLaunchTimeoutValueTestSuite, uses_correct_launch_timeout)
 
     EXPECT_CALL(*mock_blueprint_provider, blueprint_timeout(_)).WillOnce(Return(blueprint_timeout));
 
-    EXPECT_CALL(*instance_ptr, wait_until_ssh_up(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                   std::chrono::seconds(expected_timeout))))
+    EXPECT_CALL(*instance_ptr,
+                wait_until_ssh_up(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::seconds(expected_timeout))))
         .WillRepeatedly(Return());
-    EXPECT_CALL(
-        mock_utils,
-        wait_for_cloud_init(
-            _, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::seconds(expected_timeout)), _))
+    EXPECT_CALL(*instance_ptr,
+                wait_for_cloud_init(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::seconds(expected_timeout))))
         .WillRepeatedly(Return());
 
     config_builder.blueprint_provider = std::move(mock_blueprint_provider);
@@ -1851,7 +1973,7 @@ TEST_F(Daemon, refuses_launch_bridged_without_setting)
     std::stringstream err_stream;
     send_command({"launch", "--network", "bridged"}, trash_stream, err_stream);
     EXPECT_THAT(err_stream.str(),
-                HasSubstr("You have to `multipass set local.bridged-network=<name>` to use the `--bridged` shortcut."));
+                HasSubstr("You have to `multipass set local.bridged-network=<name>` to use the \"bridged\" shortcut."));
 }
 
 TEST_F(Daemon, refuses_launch_with_invalid_bridged_interface)
@@ -2008,12 +2130,229 @@ TEST_P(DaemonSetExceptions, setHandlesSettingsException)
 }
 
 INSTANTIATE_TEST_SUITE_P(
-    Daemon, DaemonSetExceptions,
-    Values(std::tuple{mp::UnrecognizedSettingException{"foo"}, grpc::StatusCode::INVALID_ARGUMENT,
+    Daemon,
+    DaemonSetExceptions,
+    Values(std::tuple{mp::NonAuthorizedBridgeSettingsException{"reason", "instance", "eth8"},
+                      grpc::StatusCode::INTERNAL,
+                      HasSubstr("Need user authorization to bridge eth8")},
+           std::tuple{mp::BridgeFailureException{"reason", "instance", "eth8"},
+                      grpc::StatusCode::INTERNAL,
+                      HasSubstr("Failure to bridge eth8")},
+           std::tuple{mp::UnrecognizedSettingException{"foo"},
+                      grpc::StatusCode::INVALID_ARGUMENT,
                       AllOf(HasSubstr("Unrecognized"), HasSubstr("foo"))},
-           std::tuple{mp::InvalidSettingException{"foo", "bar", "err"}, grpc::StatusCode::INVALID_ARGUMENT,
+           std::tuple{mp::InvalidSettingException{"foo", "bar", "err"},
+                      grpc::StatusCode::INVALID_ARGUMENT,
                       AllOf(HasSubstr("Invalid"), HasSubstr("foo"), HasSubstr("bar"), HasSubstr("err"))},
            std::tuple{std::runtime_error{"Other"}, grpc::StatusCode::INTERNAL, HasSubstr("Other")}));
+
+TEST_F(Daemon, setWorksIfUserAuthorizes)
+{
+    const std::string key{"local.instance.bridged"}, value{"true"};
+
+    mp::Daemon daemon{config_builder.build()};
+
+    auto logger_scope = mpt::MockLogger::inject();
+    logger_scope.mock_logger->screen_logs(mpl::Level::debug);
+    logger_scope.mock_logger->expect_log(mpl::Level::debug,
+                                         fmt::format("Asking for user authorization to set {}={}", key, value));
+    logger_scope.mock_logger->expect_log(mpl::Level::debug, fmt::format("Succeeded setting {}={}", key, value));
+
+    mp::SetRequest request;
+    request.set_key(key);
+    request.set_val(value);
+
+    const auto& exception = mp::NonAuthorizedBridgeSettingsException{"reason", "instance", "eth8"};
+
+    EXPECT_CALL(mock_settings, set).WillOnce(Throw(exception)).WillOnce(Return());
+
+    auto mock_server = StrictMock<mpt::MockServerReaderWriter<mp::SetReply, mp::SetRequest>>{};
+
+    EXPECT_CALL(mock_server, Write(_, _)).WillOnce([](mp::SetReply reply, auto) {
+        EXPECT_TRUE(reply.needs_authorization());
+        return true;
+    });
+
+    EXPECT_CALL(mock_server, Read(_)).WillOnce([](mp::SetRequest* request) {
+        request->set_authorized(true);
+        return true;
+    });
+
+    EXPECT_TRUE(call_daemon_slot(daemon, &mp::Daemon::set, request, mock_server).ok());
+}
+
+TEST_F(Daemon, set_works_if_bridged_interface_is_empty)
+{
+    const auto key = "local.instance.cpus";
+    const auto value = "8";
+
+    mp::Daemon daemon{config_builder.build()};
+
+    auto logger_scope = mpt::MockLogger::inject();
+    logger_scope.mock_logger->screen_logs(mpl::Level::debug);
+    logger_scope.mock_logger->expect_log(mpl::Level::debug, fmt::format("Succeeded setting {}={}", key, value));
+
+    mp::SetRequest request;
+    request.set_key(key);
+    request.set_val(value);
+    request.set_authorized(true);
+
+    EXPECT_CALL(mock_settings, get(Eq(mp::bridged_interface_key))).WillOnce(Return(""));
+
+    EXPECT_CALL(mock_settings, set(Eq(key), Eq(value))).Times(1);
+
+    auto mock_server = StrictMock<mpt::MockServerReaderWriter<mp::SetReply, mp::SetRequest>>{};
+
+    EXPECT_TRUE(call_daemon_slot(daemon, &mp::Daemon::set, request, mock_server).ok());
+}
+
+TEST_F(Daemon, setDoesNotSetIfUserDeniesAuthorization)
+{
+    const std::string key{"local.instance.bridged"}, value{"true"};
+
+    mp::Daemon daemon{config_builder.build()};
+
+    auto logger_scope = mpt::MockLogger::inject();
+    logger_scope.mock_logger->screen_logs(mpl::Level::debug);
+    logger_scope.mock_logger->expect_log(mpl::Level::debug,
+                                         fmt::format("Asking for user authorization to set {}={}", key, value));
+    logger_scope.mock_logger->expect_log(mpl::Level::debug, "User did not authorize, cancelling");
+
+    mp::SetRequest request;
+    request.set_key(key);
+    request.set_val(value);
+
+    const auto& exception = mp::NonAuthorizedBridgeSettingsException{"reason", "instance", "eth8"};
+
+    EXPECT_CALL(mock_settings, set).WillOnce(Throw(exception));
+
+    auto mock_server = StrictMock<mpt::MockServerReaderWriter<mp::SetReply, mp::SetRequest>>{};
+
+    EXPECT_CALL(mock_server, Write(_, _)).WillOnce([](mp::SetReply reply, auto) {
+        EXPECT_TRUE(reply.needs_authorization());
+        return true;
+    });
+
+    EXPECT_CALL(mock_server, Read(_)).WillOnce([](mp::SetRequest* request) {
+        request->set_authorized(false);
+        return true;
+    });
+
+    EXPECT_FALSE(call_daemon_slot(daemon, &mp::Daemon::set, request, mock_server).ok());
+}
+
+TEST_F(Daemon, add_bridged_interface_works)
+{
+    std::string instance_name{"willy"};
+
+    auto mock_factory = use_a_mock_vm_factory();
+    mpt::MockDaemon daemon{config_builder.build()};
+    auto instance_ptr = std::make_shared<NiceMock<mpt::MockVirtualMachine>>(instance_name);
+
+    auto logger_scope = mpt::MockLogger::inject();
+    logger_scope.mock_logger->screen_logs(mpl::Level::debug);
+    logger_scope.mock_logger->expect_log(mpl::Level::debug, "New interface {\"eth8\", ");
+
+    std::vector<mp::NetworkInterfaceInfo> net_info{{"eth8", "Ethernet", "A network adapter", {}, false}};
+    EXPECT_CALL(*mock_factory, networks).WillOnce(Return(net_info));
+    EXPECT_CALL(*mock_factory, prepare_networking).Times(1);
+    EXPECT_CALL(*instance_ptr, add_network_interface(0, _, _)).Times(1);
+
+    EXPECT_NO_THROW(daemon.test_add_bridged_interface(instance_name, instance_ptr));
+}
+
+TEST_F(Daemon, add_bridged_interface_throws_if_backend_throws)
+{
+    std::string instance_name{"wonka"};
+
+    auto mock_factory = use_a_mock_vm_factory();
+    mpt::MockDaemon daemon{config_builder.build()};
+    auto instance_ptr = std::make_shared<NiceMock<mpt::MockVirtualMachine>>(instance_name);
+
+    auto logger_scope = mpt::MockLogger::inject();
+    logger_scope.mock_logger->screen_logs(mpl::Level::debug);
+    logger_scope.mock_logger->expect_log(mpl::Level::debug, "New interface {\"eth8\", ");
+    logger_scope.mock_logger->expect_log(mpl::Level::debug, "Failure adding interface to instance, rolling back");
+    std::vector<mp::NetworkInterfaceInfo> net_info{{"eth8", "Ethernet", "A network adapter", {}, false}};
+    EXPECT_CALL(*mock_factory, networks).WillOnce(Return(net_info));
+    EXPECT_CALL(*mock_factory, prepare_networking).Times(1);
+    EXPECT_CALL(*instance_ptr, add_network_interface(0, _, _)).WillOnce(Throw(std::runtime_error("something bad")));
+
+    std::string msg{"Cannot update instance settings; instance: " + instance_name + "; reason: Failure to bridge eth8"};
+    MP_EXPECT_THROW_THAT(daemon.test_add_bridged_interface(instance_name, instance_ptr),
+                         std::runtime_error,
+                         mpt::match_what(msg));
+}
+
+TEST_F(Daemon, add_bridged_interface_throws_on_bad_bridged_network_setting)
+{
+    std::string instance_name{"bucket"};
+
+    auto mock_factory = use_a_mock_vm_factory();
+    mpt::MockDaemon daemon{config_builder.build()};
+    auto instance_ptr = std::make_shared<NiceMock<mpt::MockVirtualMachine>>(instance_name);
+
+    std::vector<mp::NetworkInterfaceInfo> net_info{{"eth9", "Ethernet", "An invalid network adapter", {}, false}};
+    EXPECT_CALL(*mock_factory, networks).WillOnce(Return(net_info));
+    EXPECT_CALL(*mock_factory, prepare_networking).Times(0);
+    EXPECT_CALL(*instance_ptr, add_network_interface(_, _, _)).Times(0);
+
+    std::string msg{"Invalid network 'eth8' set as bridged interface, use `multipass set local.bridged-network=<name>` "
+                    "to correct. See `multipass networks` for valid names."};
+    MP_EXPECT_THROW_THAT(daemon.test_add_bridged_interface(instance_name, instance_ptr),
+                         std::runtime_error,
+                         mpt::match_what(msg));
+}
+
+TEST_F(Daemon, add_bridged_interface_throws_if_needs_authorization)
+{
+    std::string instance_name{"glass-elevator"};
+
+    auto mock_factory = use_a_mock_vm_factory();
+    mpt::MockDaemon daemon{config_builder.build()};
+    auto instance_ptr = std::make_shared<NiceMock<mpt::MockVirtualMachine>>(instance_name);
+
+    std::vector<mp::NetworkInterfaceInfo> net_info{{"eth8", "Ethernet", "A network adapter", {}, true}};
+    EXPECT_CALL(*mock_factory, networks).WillOnce(Return(net_info));
+    EXPECT_CALL(*mock_factory, prepare_networking).Times(0);
+    EXPECT_CALL(*instance_ptr, add_network_interface(_, _, _)).Times(0);
+
+    std::string msg{
+        "Cannot update instance settings; instance: glass-elevator; reason: Need user authorization to bridge eth8"};
+    MP_EXPECT_THROW_THAT(daemon.test_add_bridged_interface(instance_name, instance_ptr),
+                         mp::NonAuthorizedBridgeSettingsException,
+                         mpt::match_what(msg));
+}
+
+struct DaemonIsBridged : public Daemon, public WithParamInterface<std::pair<std::vector<mp::NetworkInterface>, bool>>
+{
+};
+
+TEST_P(DaemonIsBridged, is_bridged_works)
+{
+    const auto [extra_interfaces, result] = GetParam();
+
+    std::string instance_name{"charlie"};
+
+    mp::VMSpecs specs;
+    specs.extra_interfaces = extra_interfaces;
+
+    auto mock_factory = use_a_mock_vm_factory();
+    mpt::MockDaemon daemon{config_builder.build()};
+    auto instance_ptr = std::make_shared<NiceMock<mpt::MockVirtualMachine>>(instance_name);
+
+    EXPECT_CALL(*mock_factory, bridge_name_for(_)).WillOnce(Return("br-eth8"));
+
+    EXPECT_EQ(daemon.test_is_bridged(instance_name, specs), result);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Daemon,
+    DaemonIsBridged,
+    Values(std::make_pair(std::vector<mp::NetworkInterface>{{"eth8", "52:54:00:09:10:11", true}}, true),
+           std::make_pair(std::vector<mp::NetworkInterface>{{"br-eth8", "52:54:00:12:13:14", true}}, true),
+           std::make_pair(std::vector<mp::NetworkInterface>{{"eth9", "52:54:00:15:16:17", true}}, false),
+           std::make_pair(std::vector<mp::NetworkInterface>{{"br-eth9", "52:54:00:18:19:20", true}}, false)));
 
 TEST_F(Daemon, requests_networks)
 {
@@ -2082,5 +2421,29 @@ TEST_F(Daemon, launch_fails_with_incompatible_blueprint)
     std::stringstream err_stream;
     send_command({"launch", "foo"}, trash_stream, err_stream);
     EXPECT_THAT(err_stream.str(), HasSubstr("The \"foo\" Blueprint is not compatible with this host."));
+}
+
+TEST_F(Daemon, info_all_returns_all_instances)
+{
+    const std::string good_instance_name{"good-instance"}, deleted_instance_name{"deleted-instance"};
+    const auto good_instance_json = fmt::format(valid_template, good_instance_name, "10");
+    const auto deleted_instance_json = fmt::format(deleted_template, deleted_instance_name, "11");
+    const auto instances_json = fmt::format("{{{}, {}}}", good_instance_json, deleted_instance_json);
+    const auto [temp_dir, __] = plant_instance_json(instances_json);
+    config_builder.data_directory = temp_dir->path();
+    config_builder.vault = std::make_unique<NiceMock<mpt::MockVMImageVault>>();
+
+    EXPECT_CALL(*use_a_mock_vm_factory(), create_virtual_machine).WillRepeatedly(WithArg<0>([](const auto& desc) {
+        return std::make_unique<mpt::StubVirtualMachine>(desc.vm_name);
+    }));
+
+    const auto names_matcher = UnorderedElementsAre(Property(&mp::DetailedInfoItem::name, good_instance_name),
+                                                    Property(&mp::DetailedInfoItem::name, deleted_instance_name));
+
+    StrictMock<mpt::MockServerReaderWriter<mp::InfoReply, mp::InfoRequest>> mock_server{};
+    EXPECT_CALL(mock_server, Write(Property(&mp::InfoReply::details, names_matcher), _)).WillOnce(Return(true));
+
+    mp::Daemon daemon{config_builder.build()};
+    call_daemon_slot(daemon, &mp::Daemon::info, mp::InfoRequest{}, mock_server);
 }
 } // namespace

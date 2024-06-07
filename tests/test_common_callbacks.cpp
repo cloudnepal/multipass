@@ -47,16 +47,32 @@ struct TestSpinnerCallbacks : public Test
     mp::AnimatedSpinner spinner{out};
 };
 
-using IterativeCallback = bool;
-struct TestLoggingSpinnerCallbacks : public TestSpinnerCallbacks, public WithParamInterface<IterativeCallback>
+enum class CommonCallbackType
+{
+    Logging,
+    Reply,
+    Iterative
+};
+
+struct TestLoggingSpinnerCallbacks : public TestSpinnerCallbacks, public WithParamInterface<CommonCallbackType>
 {
     std::function<void(const mp::MountReply&, grpc::ClientReaderWriterInterface<mp::MountRequest, mp::MountReply>*)>
     make_callback()
     {
-        if (GetParam())
-            return mp::make_iterative_spinner_callback<mp::MountRequest, mp::MountReply>(spinner, term);
-        else
+        switch (GetParam())
+        {
+        case CommonCallbackType::Logging:
             return mp::make_logging_spinner_callback<mp::MountRequest, mp::MountReply>(spinner, err);
+            break;
+        case CommonCallbackType::Reply:
+            return mp::make_reply_spinner_callback<mp::MountRequest, mp::MountReply>(spinner, err);
+            break;
+        case CommonCallbackType::Iterative:
+            return mp::make_iterative_spinner_callback<mp::MountRequest, mp::MountReply>(spinner, term);
+            break;
+        default:
+            assert(false && "shouldn't be here");
+        }
     }
 };
 
@@ -83,51 +99,89 @@ TEST_P(TestLoggingSpinnerCallbacks, loggingSpinnerCallbackIgnoresEmptyLog)
     EXPECT_THAT(out.str(), clearStreamMatcher());
 }
 
-INSTANTIATE_TEST_SUITE_P(TestLoggingSpinnerCallbacks, TestLoggingSpinnerCallbacks, Values(false, true));
+INSTANTIATE_TEST_SUITE_P(TestLoggingSpinnerCallbacks,
+                         TestLoggingSpinnerCallbacks,
+                         Values(CommonCallbackType::Logging, CommonCallbackType::Reply, CommonCallbackType::Iterative));
 
-TEST_F(TestSpinnerCallbacks, iterativeSpinnerCallbackUpdatesSpinnerMessage)
+struct TestReplySpinnerCallbacks : public TestSpinnerCallbacks, public WithParamInterface<CommonCallbackType>
+{
+    std::function<void(const mp::MountReply&, grpc::ClientReaderWriterInterface<mp::MountRequest, mp::MountReply>*)>
+    make_callback()
+    {
+        switch (GetParam())
+        {
+        case CommonCallbackType::Reply:
+            return mp::make_reply_spinner_callback<mp::MountRequest, mp::MountReply>(spinner, err);
+            break;
+        case CommonCallbackType::Iterative:
+            return mp::make_iterative_spinner_callback<mp::MountRequest, mp::MountReply>(spinner, term);
+            break;
+        default:
+            assert(false && "shouldn't be here");
+            throw std::runtime_error{"bad test instantiation"};
+        }
+    }
+};
+
+TEST_P(TestReplySpinnerCallbacks, replySpinnerCallbackUpdatesSpinnerMessage)
 {
     constexpr auto msg = "answer";
 
     mp::MountReply reply;
     reply.set_reply_message(msg);
 
-    auto cb = mp::make_iterative_spinner_callback<mp::MountRequest, mp::MountReply>(spinner, term);
-    cb(reply, nullptr);
+    make_callback()(reply, nullptr);
 
     EXPECT_THAT(err.str(), IsEmpty());
     EXPECT_THAT(out.str(), HasSubstr(msg));
 }
 
-TEST_F(TestSpinnerCallbacks, iterativeSpinnerCallbackIgnoresEmptyMessage)
+TEST_P(TestReplySpinnerCallbacks, replySpinnerCallbackIgnoresEmptyMessage)
 {
-    mp::StartReply reply;
+    mp::MountReply reply;
 
-    auto cb = mp::make_iterative_spinner_callback<mp::StartRequest, mp::StartReply>(spinner, term);
-    cb(reply, nullptr);
+    make_callback()(reply, nullptr);
 
     EXPECT_THAT(err.str(), IsEmpty());
     EXPECT_THAT(out.str(), IsEmpty());
 }
 
-TEST_F(TestSpinnerCallbacks, iterativeSpinnerCallbackHandlesCredentialRequest)
+INSTANTIATE_TEST_SUITE_P(TestReplySpinnerCallbacks,
+                         TestReplySpinnerCallbacks,
+                         Values(CommonCallbackType::Reply, CommonCallbackType::Iterative));
+
+TEST_F(TestSpinnerCallbacks, iterativeSpinnerCallbackHandlesPasswordRequest)
 {
-    constexpr auto usr = "ubuntu", pwd = "xyz";
+    constexpr auto pwd = "xyz";
     auto [mock_client_platform, guard] = mpt::MockClientPlatform::inject<StrictMock>();
     mpt::MockClientReaderWriter<mp::RestartRequest, mp::RestartReply> mock_client;
 
     mp::RestartReply reply;
-    reply.set_credentials_requested(true);
+    reply.set_password_requested(true);
 
-    EXPECT_CALL(*mock_client_platform, get_user_password(&term)).WillOnce(Return(std::pair{usr, pwd}));
-    EXPECT_CALL(mock_client, Write(Property(&mp::RestartRequest::user_credentials,
-                                            AllOf(Property(&mp::UserCredentials::username, StrEq(usr)),
-                                                  Property(&mp::UserCredentials::password, StrEq(pwd)))),
-                                   _))
-        .WillOnce(Return(true));
+    EXPECT_CALL(*mock_client_platform, get_password(&term)).WillOnce(Return(pwd));
+    EXPECT_CALL(mock_client, Write(Property(&mp::RestartRequest::password, StrEq(pwd)), _)).WillOnce(Return(true));
 
     auto cb = mp::make_iterative_spinner_callback<mp::RestartRequest, mp::RestartReply>(spinner, term);
     cb(reply, &mock_client);
+
+    EXPECT_THAT(err.str(), IsEmpty());
+    EXPECT_THAT(out.str(), clearStreamMatcher());
+}
+
+TEST_F(TestSpinnerCallbacks, confirmationCallbackAnswers)
+{
+    constexpr auto key = "local.instance-name.bridged";
+
+    mpt::MockClientReaderWriter<mp::SetRequest, mp::SetReply> mock_client;
+
+    mp::SetReply reply;
+    reply.set_needs_authorization(true);
+
+    EXPECT_CALL(mock_client, Write(_, _)).WillOnce(Return(true));
+
+    auto callback = mp::make_confirmation_callback<mp::SetRequest, mp::SetReply>(term, key);
+    callback(reply, &mock_client);
 
     EXPECT_THAT(err.str(), IsEmpty());
     EXPECT_THAT(out.str(), clearStreamMatcher());

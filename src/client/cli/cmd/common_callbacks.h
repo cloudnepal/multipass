@@ -20,6 +20,8 @@
 #include "animated_spinner.h"
 
 #include <multipass/cli/client_common.h>
+#include <multipass/cli/prompters.h>
+#include <multipass/constants.h>
 #include <multipass/terminal.h>
 
 #include <grpc++/grpc++.h>
@@ -31,8 +33,21 @@ auto make_logging_spinner_callback(AnimatedSpinner& spinner, std::ostream& strea
 {
     return [&spinner, &stream](const Reply& reply, grpc::ClientReaderWriterInterface<Request, Reply>*) {
         if (!reply.log_line().empty())
-        {
             spinner.print(stream, reply.log_line());
+    };
+}
+
+template <typename Request, typename Reply>
+auto make_reply_spinner_callback(AnimatedSpinner& spinner, std::ostream& stream)
+{
+    return [&spinner, &stream](const Reply& reply, grpc::ClientReaderWriterInterface<Request, Reply>*) {
+        if (!reply.log_line().empty())
+            spinner.print(stream, reply.log_line());
+
+        if (const auto& msg = reply.reply_message(); !msg.empty())
+        {
+            spinner.stop();
+            spinner.start(msg);
         }
     };
 }
@@ -42,21 +57,40 @@ auto make_iterative_spinner_callback(AnimatedSpinner& spinner, Terminal& term)
 {
     return [&spinner, &term](const Reply& reply, grpc::ClientReaderWriterInterface<Request, Reply>* client) {
         if (!reply.log_line().empty())
-        {
             spinner.print(term.cerr(), reply.log_line());
-        }
 
-        if (reply.credentials_requested())
+        if (reply.password_requested())
         {
             spinner.stop();
 
-            return cmd::handle_user_password(client, &term);
+            return cmd::handle_password(client, &term);
         }
 
         if (const auto& msg = reply.reply_message(); !msg.empty())
         {
             spinner.stop();
             spinner.start(msg);
+        }
+    };
+}
+
+template <typename Request, typename Reply>
+auto make_confirmation_callback(Terminal& term, const QString& key)
+{
+    return [&key, &term](Reply& reply, grpc::ClientReaderWriterInterface<Request, Reply>* client) {
+        if (key.startsWith(daemon_settings_root) && key.endsWith(bridged_network_name) && reply.needs_authorization())
+        {
+            auto bridged_network = reply.reply_message();
+
+            std::vector<std::string> nets(1, bridged_network);
+
+            BridgePrompter prompter(&term);
+
+            auto request = Request{};
+            auto answer = prompter.bridge_prompt(nets);
+            request.set_authorized(answer);
+
+            client->Write(request);
         }
     };
 }

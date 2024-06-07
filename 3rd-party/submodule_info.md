@@ -12,19 +12,14 @@ Version: 1.52.1 (+[our patches](https://github.com/CanonicalLtd/grpc/compare/v1.
 <https://github.com/grpc/grpc/releases>
 
 ### libssh
-Version: 0.10.4 (+[our patches](https://github.com/CanonicalLtd/libssh/compare/libssh-0.10.4..3413f2fe)) |
-<https://github.com/CanonicalLtd/libssh.git> |
+Version: 0.10.5 (+[our patches](https://github.com/canonical/libssh/compare/libssh-0.10.5..843b97db)) |
+<https://github.com/canonical/libssh.git> |
 <https://www.libssh.org/>
 
 ### fmt
-Version: 9.1.0 |
+Version: 10.1.1 |
 <https://github.com/fmtlib/fmt.git> |
 <https://github.com/fmtlib/fmt/releases>
-
-### QHotKey
-Version: 1.4.2 |
-<https://github.com/Skycoder42/QHotkey.git> |
-<https://github.com/Skycoder42/QHotkey/releases>
 
 ### scope_guard
 Version: 1.1.0 |
@@ -51,12 +46,7 @@ Version: 1.9.4 |
 <https://github.com/open-source-parsers/jsoncpp.git> |
 <https://github.com/open-source-parsers/jsoncpp/releases>
 
-### HyperKit
-Version: v0.20210107 |
-<https://github.com/moby/hyperkit.git> |
-<https://github.com/moby/hyperkit/releases>
-
 ### POCO
-Version: 1.11.2 |
+Version: 1.12.4 |
 <https://github.com/pocoproject/poco.git> |
 <https://github.com/pocoproject/poco/releases>

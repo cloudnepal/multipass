@@ -37,18 +37,37 @@ namespace
 {
 struct MockBaseFactory : mp::BaseVirtualMachineFactory
 {
-    MOCK_METHOD2(create_virtual_machine,
-                 mp::VirtualMachine::UPtr(const mp::VirtualMachineDescription&, mp::VMStatusMonitor&));
-    MOCK_METHOD1(remove_resources_for, void(const std::string&));
-    MOCK_METHOD1(prepare_source_image, mp::VMImage(const mp::VMImage&));
-    MOCK_METHOD2(prepare_instance_image, void(const mp::VMImage&, const mp::VirtualMachineDescription&));
-    MOCK_METHOD0(hypervisor_health_check, void());
-    MOCK_METHOD0(get_backend_version_string, QString());
-    MOCK_METHOD1(prepare_networking, void(std::vector<mp::NetworkInterface>&));
-    MOCK_CONST_METHOD0(networks, std::vector<mp::NetworkInterfaceInfo>());
-    MOCK_METHOD1(create_bridge_with, std::string(const mp::NetworkInterfaceInfo&));
-    MOCK_METHOD3(prepare_interface, void(mp::NetworkInterface& net, std::vector<mp::NetworkInterfaceInfo>& host_nets,
-                                         const std::string& bridge_type));
+    MockBaseFactory() : MockBaseFactory{std::make_unique<mp::test::TempDir>()}
+    {
+    }
+
+    MockBaseFactory(std::unique_ptr<mp::test::TempDir>&& tmp_dir)
+        : mp::BaseVirtualMachineFactory{tmp_dir->path()}, tmp_dir{std::move(tmp_dir)}
+    {
+    }
+
+    MOCK_METHOD(mp::VirtualMachine::UPtr,
+                create_virtual_machine,
+                (const mp::VirtualMachineDescription&, const mp::SSHKeyProvider&, mp::VMStatusMonitor&),
+                (override));
+    MOCK_METHOD(mp::VMImage, prepare_source_image, (const mp::VMImage&), (override));
+    MOCK_METHOD(void, prepare_instance_image, (const mp::VMImage&, const mp::VirtualMachineDescription&), (override));
+    MOCK_METHOD(void, hypervisor_health_check, (), (override));
+    MOCK_METHOD(QString, get_backend_version_string, (), (const, override));
+    MOCK_METHOD(void, prepare_networking, (std::vector<mp::NetworkInterface>&), (override));
+    MOCK_METHOD(std::vector<mp::NetworkInterfaceInfo>, networks, (), (const, override));
+    MOCK_METHOD(std::string, bridge_name_for, (const std::string&), (const, override));
+    MOCK_METHOD(std::string, create_bridge_with, (const mp::NetworkInterfaceInfo&), (override));
+    MOCK_METHOD(void, prepare_interface,
+                (mp::NetworkInterface & net, std::vector<mp::NetworkInterfaceInfo>& host_nets,
+                 const std::string& bridge_type),
+                (override));
+    MOCK_METHOD(void, remove_resources_for_impl, (const std::string&), (override));
+
+    std::string base_bridge_name_for(const std::string& iface_name) const
+    {
+        return mp::BaseVirtualMachineFactory::bridge_name_for(iface_name);
+    }
 
     std::string base_create_bridge_with(const mp::NetworkInterfaceInfo& interface)
     {
@@ -66,6 +85,8 @@ struct MockBaseFactory : mp::BaseVirtualMachineFactory
     {
         return mp::BaseVirtualMachineFactory::prepare_interface(net, host_nets, bridge_type); // protected
     }
+
+    std::unique_ptr<mp::test::TempDir> tmp_dir;
 };
 
 struct BaseFactory : public Test
@@ -114,13 +135,13 @@ TEST_F(BaseFactory, networks_throws)
 // at this time.  Instead, just make sure an ISO image is created and has the expected path.
 TEST_F(BaseFactory, creates_cloud_init_iso_image)
 {
-    mpt::TempDir iso_dir;
+    MockBaseFactory factory;
     const std::string name{"foo"};
     const YAML::Node metadata{YAML::Load({fmt::format("name: {}", name)})}, vendor_data{metadata}, user_data{metadata},
         network_data{metadata};
 
     mp::VMImage image;
-    image.image_path = QString("%1/%2").arg(iso_dir.path()).arg(QString::fromStdString(name));
+    image.image_path = QString("%1/%2").arg(factory.tmp_dir->path()).arg(QString::fromStdString(name));
 
     mp::VirtualMachineDescription vm_desc{2,
                                           mp::MemorySize{"3M"},
@@ -136,11 +157,17 @@ TEST_F(BaseFactory, creates_cloud_init_iso_image)
                                           vendor_data,
                                           network_data};
 
-    MockBaseFactory factory;
     factory.configure(vm_desc);
 
-    EXPECT_EQ(vm_desc.cloud_init_iso, QString("%1/cloud-init-config.iso").arg(iso_dir.path()));
+    EXPECT_EQ(vm_desc.cloud_init_iso, QString("%1/cloud-init-config.iso").arg(factory.tmp_dir->path()));
     EXPECT_TRUE(QFile::exists(vm_desc.cloud_init_iso));
+}
+
+TEST_F(BaseFactory, baseBridgeNameForReturnsEmpty)
+{
+    StrictMock<MockBaseFactory> factory;
+
+    ASSERT_EQ(factory.base_bridge_name_for("any_interface"), "");
 }
 
 TEST_F(BaseFactory, create_bridge_not_implemented)
@@ -238,7 +265,8 @@ TEST_F(BaseFactory, prepareInterfaceCreatesBridgeForUnbridgedNetwork)
     factory.base_prepare_interface(extra_net, host_nets, bridge_type);
     EXPECT_EQ(extra_net, extra_check);
 
-    const auto [host_diff, ignore] = std::mismatch(host_nets.cbegin(), host_nets.cend(), host_copy.cbegin());
+    const auto [host_diff, ignore] =
+        std::mismatch(host_nets.cbegin(), host_nets.cend(), host_copy.cbegin(), host_copy.cend());
     ASSERT_NE(host_diff, host_nets.cend());
     EXPECT_EQ(host_diff->id, bridge);
     EXPECT_EQ(host_diff->type, bridge_type);
@@ -276,5 +304,11 @@ TEST_F(BaseFactory, prepareNetworkingGutsPreparesEachRequestedNetwork)
     factory.base_prepare_networking_guts(extra_nets, bridge_type);
     EXPECT_EQ(extra_nets.size(), num_nets);
     EXPECT_THAT(extra_nets, Each(Eq(tag)));
+}
+
+TEST_F(BaseFactory, factoryHasDefaultSuspendSupport)
+{
+    MockBaseFactory factory;
+    EXPECT_NO_THROW(factory.mp::BaseVirtualMachineFactory::require_suspend_support());
 }
 } // namespace

@@ -35,12 +35,15 @@ public:
     using DomainUPtr = std::unique_ptr<virDomain, decltype(virDomainFree)*>;
     using NetworkUPtr = std::unique_ptr<virNetwork, decltype(virNetworkFree)*>;
 
-    LibVirtVirtualMachine(const VirtualMachineDescription& desc, const std::string& bridge_name,
-                          VMStatusMonitor& monitor, const LibvirtWrapper::UPtr& libvirt_wrapper);
+    LibVirtVirtualMachine(const VirtualMachineDescription& desc,
+                          const std::string& bridge_name,
+                          VMStatusMonitor& monitor,
+                          const LibvirtWrapper::UPtr& libvirt_wrapper,
+                          const SSHKeyProvider& key_provider,
+                          const Path& instance_dir);
     ~LibVirtVirtualMachine();
 
     void start() override;
-    void stop() override;
     void shutdown() override;
     void suspend() override;
     State current_state() override;
@@ -49,7 +52,6 @@ public:
     std::string ssh_username() override;
     std::string management_ipv4() override;
     std::string ipv6() override;
-    void wait_until_ssh_up(std::chrono::milliseconds timeout) override;
     void ensure_vm_is_running() override;
     void update_state() override;
     void update_cpus(int num_cores) override;

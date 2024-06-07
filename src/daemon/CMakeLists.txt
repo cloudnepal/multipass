@@ -24,6 +24,8 @@ add_library(daemon STATIC
   daemon_rpc.cpp
   default_vm_image_vault.cpp
   instance_settings_handler.cpp
+  runtime_instance_info_helper.cpp
+  snapshot_settings_handler.cpp
   ubuntu_image_host.cpp)
 
 include_directories(daemon
@@ -37,14 +39,13 @@ target_link_libraries(daemon
   petname
   platform
   rpc
-  scope_guard # TODO hk migration, remove
   settings
   simplestreams
   ssh
   sshfs_mount
   utils
-  Qt5::Core
-  Qt5::Network
+  Qt6::Core
+  Qt6::Network
   blueprint_provider
   xz_image_decoder
   yaml)
@@ -57,7 +58,7 @@ target_link_libraries(delayed_shutdown
   fmt
   logger
   ssh_common
-  Qt5::Core
+  Qt6::Core
 )
 
 add_executable(multipassd daemon_main.cpp)

@@ -29,17 +29,27 @@
 #include "common.h"
 #include "stub_virtual_machine.h"
 #include "stub_vm_image_vault.h"
+#include "temp_dir.h"
 
 namespace mp = multipass;
 namespace mpt = multipass::test;
 
-std::function<mp::VMImage(const mp::FetchType&, const mp::Query&, const mp::VMImageVault::PrepareAction&,
-                          const mp::ProgressMonitor&, const bool, const std::optional<std::string>)>
+std::function<mp::VMImage(const mp::FetchType&,
+                          const mp::Query&,
+                          const mp::VMImageVault::PrepareAction&,
+                          const mp::ProgressMonitor&,
+                          const bool,
+                          const std::optional<std::string>,
+                          const mp::Path&)>
 mpt::fetch_image_lambda(const std::string& release, const std::string& remote, const bool must_have_checksum)
 {
-    return [&release, &remote, must_have_checksum](
-               const mp::FetchType& fetch_type, const mp::Query& query, const mp::VMImageVault::PrepareAction& prepare,
-               const mp::ProgressMonitor& monitor, const bool unlock, const std::optional<std::string>& checksum) {
+    return [&release, &remote, must_have_checksum](const mp::FetchType& fetch_type,
+                                                   const mp::Query& query,
+                                                   const mp::VMImageVault::PrepareAction& prepare,
+                                                   const mp::ProgressMonitor& monitor,
+                                                   const bool unlock,
+                                                   const std::optional<std::string>& checksum,
+                                                   const mp::Path& save_dir) {
         EXPECT_EQ(query.release, release);
         if (remote.empty())
         {
@@ -55,15 +65,20 @@ mpt::fetch_image_lambda(const std::string& release, const std::string& remote, c
             EXPECT_NE(checksum, std::nullopt);
         }
 
-        return mpt::StubVMImageVault().fetch_image(fetch_type, query, prepare, monitor, unlock, checksum);
+        return mpt::StubVMImageVault().fetch_image(fetch_type, query, prepare, monitor, unlock, checksum, save_dir);
     };
 }
 
-std::function<mp::VirtualMachine::UPtr(const mp::VirtualMachineDescription&, mp::VMStatusMonitor&)>
-mpt::create_virtual_machine_lambda(const int& num_cores, const mp::MemorySize& mem_size,
-                                   const mp::MemorySize& disk_space, const std::string& name)
+std::function<
+    mp::VirtualMachine::UPtr(const mp::VirtualMachineDescription&, const mp::SSHKeyProvider&, mp::VMStatusMonitor&)>
+mpt::create_virtual_machine_lambda(const int& num_cores,
+                                   const mp::MemorySize& mem_size,
+                                   const mp::MemorySize& disk_space,
+                                   const std::string& name)
 {
-    return [&num_cores, &mem_size, &disk_space, &name](const mp::VirtualMachineDescription& vm_desc, auto&) {
+    return [&num_cores, &mem_size, &disk_space, &name](const mp::VirtualMachineDescription& vm_desc,
+                                                       const mp::SSHKeyProvider&,
+                                                       mp::VMStatusMonitor&) {
         EXPECT_EQ(vm_desc.num_cores, num_cores);
         EXPECT_EQ(vm_desc.mem_size, mem_size);
         EXPECT_EQ(vm_desc.disk_space, disk_space);

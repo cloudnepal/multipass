@@ -157,9 +157,13 @@ mp::LXDVMImageVault::LXDVMImageVault(std::vector<VMImageHost*> image_hosts, URLD
 {
 }
 
-mp::VMImage mp::LXDVMImageVault::fetch_image(const FetchType& fetch_type, const Query& query,
-                                             const PrepareAction& prepare, const ProgressMonitor& monitor,
-                                             const bool unlock, const std::optional<std::string>& checksum)
+mp::VMImage mp::LXDVMImageVault::fetch_image(const FetchType& fetch_type,
+                                             const Query& query,
+                                             const PrepareAction& prepare,
+                                             const ProgressMonitor& monitor,
+                                             const bool unlock,
+                                             const std::optional<std::string>& checksum,
+                                             const mp::Path& /* save_dir */)
 {
     // Look for an already existing instance and get its image info
     try
@@ -261,8 +265,18 @@ mp::VMImage mp::LXDVMImageVault::fetch_image(const FetchType& fetch_type, const 
             last_modified = QDateTime::currentDateTime();
         }
 
-        info = VMImageInfo{
-            {}, {}, {}, {}, true, image_url.url(), {}, {}, id, {}, last_modified.toString(), 0, checksum.has_value()};
+        info = VMImageInfo{{},
+                           {},
+                           {},
+                           {},
+                           {},
+                           true,
+                           image_url.url(),
+                           id,
+                           {},
+                           last_modified.toString(),
+                           0,
+                           checksum.has_value()};
 
         source_image.id = id.toStdString();
         source_image.release_date = last_modified.toString(Qt::ISODateWithMs).toStdString();
@@ -522,6 +536,7 @@ void mp::LXDVMImageVault::poll_download_operation(const QJsonObject& json_reply,
                           .arg(json_reply["metadata"].toObject()["id"].toString()));
 
         // Instead of polling, need to use websockets to get events
+        auto last_download_progress = -2;
         while (true)
         {
             try
@@ -544,11 +559,14 @@ void mp::LXDVMImageVault::poll_download_operation(const QJsonObject& json_reply,
                     auto download_progress = parse_percent_as_int(
                         task_reply["metadata"].toObject()["metadata"].toObject()["download_progress"].toString());
 
-                    if (!monitor(LaunchProgress::IMAGE, download_progress))
+                    if (last_download_progress != download_progress &&
+                        !monitor(LaunchProgress::IMAGE, download_progress))
                     {
                         mp::lxd_request(manager, "DELETE", task_url);
                         throw mp::AbortedDownloadException{"Download aborted"};
                     }
+
+                    last_download_progress = download_progress;
 
                     std::this_thread::sleep_for(1s);
                 }

@@ -109,6 +109,8 @@ std::unique_ptr<const mp::DaemonConfig> mp::DaemonConfigBuilder::build()
     mpl::set_logger(multiplexing_logger);
 
     auto storage_path = MP_PLATFORM.multipass_storage_location();
+    if (!storage_path.isEmpty())
+        MP_UTILS.make_dir(storage_path, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 
     if (cache_directory.isEmpty())
     {
@@ -124,7 +126,6 @@ std::unique_ptr<const mp::DaemonConfig> mp::DaemonConfigBuilder::build()
         else
             data_directory = MP_STDPATHS.writableLocation(StandardPaths::AppDataLocation);
     }
-    MP_PLATFORM.set_permissions(storage_path, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 
     if (url_downloader == nullptr)
         url_downloader = std::make_unique<URLDownloader>(cache_directory, std::chrono::seconds{10});
@@ -134,16 +135,18 @@ std::unique_ptr<const mp::DaemonConfig> mp::DaemonConfigBuilder::build()
         update_prompt = platform::make_update_prompt();
     if (image_hosts.empty())
     {
-        image_hosts.push_back(std::make_unique<mp::CustomVMImageHost>(QSysInfo::currentCpuArchitecture(),
-                                                                      url_downloader.get(), manifest_ttl));
+        image_hosts.push_back(
+            std::make_unique<mp::CustomVMImageHost>(QSysInfo::currentCpuArchitecture(), url_downloader.get()));
         image_hosts.push_back(std::make_unique<mp::UbuntuVMImageHost>(
             std::vector<std::pair<std::string, UbuntuVMImageRemote>>{
                 {mp::release_remote, UbuntuVMImageRemote{"https://cloud-images.ubuntu.com/", "releases/",
                                                          std::make_optional<QString>(mp::mirror_key)}},
                 {mp::daily_remote, UbuntuVMImageRemote{"https://cloud-images.ubuntu.com/", "daily/",
                                                        std::make_optional<QString>(mp::mirror_key)}},
+                {mp::snapcraft_remote, UbuntuVMImageRemote{"https://cloud-images.ubuntu.com/", "buildd/daily/",
+                                                           std::make_optional<QString>(mp::mirror_key)}},
                 {mp::appliance_remote, UbuntuVMImageRemote{"https://cdimage.ubuntu.com/", "ubuntu-core/appliances/"}}},
-            url_downloader.get(), manifest_ttl));
+            url_downloader.get()));
     }
     if (vault == nullptr)
     {

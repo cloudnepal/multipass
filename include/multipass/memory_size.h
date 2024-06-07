@@ -25,14 +25,14 @@ namespace multipass
 class MemorySize
 {
 public:
-    friend bool operator==(const MemorySize& a, const MemorySize& b);
-    friend bool operator!=(const MemorySize& a, const MemorySize& b);
-    friend bool operator<(const MemorySize& a, const MemorySize& b);
-    friend bool operator>(const MemorySize& a, const MemorySize& b);
-    friend bool operator<=(const MemorySize& a, const MemorySize& b);
-    friend bool operator>=(const MemorySize& a, const MemorySize& b);
+    friend bool operator==(const MemorySize& a, const MemorySize& b) noexcept;
+    friend bool operator!=(const MemorySize& a, const MemorySize& b) noexcept;
+    friend bool operator<(const MemorySize& a, const MemorySize& b) noexcept;
+    friend bool operator>(const MemorySize& a, const MemorySize& b) noexcept;
+    friend bool operator<=(const MemorySize& a, const MemorySize& b) noexcept;
+    friend bool operator>=(const MemorySize& a, const MemorySize& b) noexcept;
 
-    MemorySize();
+    MemorySize() noexcept;
     explicit MemorySize(const std::string& val);
     long long in_bytes() const noexcept;
     long long in_kilobytes() const noexcept;
@@ -45,12 +45,14 @@ private:
     long long bytes;
 };
 
-bool operator==(const MemorySize& a, const MemorySize& b);
-bool operator!=(const MemorySize& a, const MemorySize& b);
-bool operator<(const MemorySize& a, const MemorySize& b);
-bool operator>(const MemorySize& a, const MemorySize& b);
-bool operator<=(const MemorySize& a, const MemorySize& b);
-bool operator>=(const MemorySize& a, const MemorySize& b);
+long long in_bytes(const std::string& mem_value);
+
+bool operator==(const MemorySize& a, const MemorySize& b) noexcept;
+bool operator!=(const MemorySize& a, const MemorySize& b) noexcept;
+bool operator<(const MemorySize& a, const MemorySize& b) noexcept;
+bool operator>(const MemorySize& a, const MemorySize& b) noexcept;
+bool operator<=(const MemorySize& a, const MemorySize& b) noexcept;
+bool operator>=(const MemorySize& a, const MemorySize& b) noexcept;
 
 } // namespace multipass
 

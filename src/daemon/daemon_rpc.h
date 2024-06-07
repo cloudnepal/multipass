@@ -54,6 +54,8 @@ class DaemonRpc : public QObject, public multipass::Rpc::Service, private Disabl
 public:
     DaemonRpc(const std::string& server_address, const CertProvider& cert_provider, CertStore* client_cert_store);
 
+    void shutdown_and_wait();
+
 signals:
     void on_create(const CreateRequest* request, grpc::ServerReaderWriter<CreateReply, CreateRequest>* server,
                    std::promise<grpc::Status>* status_promise);
@@ -98,6 +100,12 @@ signals:
     void on_authenticate(const AuthenticateRequest* request,
                          grpc::ServerReaderWriter<AuthenticateReply, AuthenticateRequest>* server,
                          std::promise<grpc::Status>* status_promise);
+    void on_snapshot(const SnapshotRequest* request,
+                     grpc::ServerReaderWriter<SnapshotReply, SnapshotRequest>* server,
+                     std::promise<grpc::Status>* status_promise);
+    void on_restore(const RestoreRequest* request,
+                    grpc::ServerReaderWriter<RestoreReply, RestoreRequest>* server,
+                    std::promise<grpc::Status>* status_promise);
 
 private:
     template <typename OperationSignal>
@@ -145,6 +153,10 @@ protected:
     grpc::Status keys(grpc::ServerContext* context, grpc::ServerReaderWriter<KeysReply, KeysRequest>* server) override;
     grpc::Status authenticate(grpc::ServerContext* context,
                               grpc::ServerReaderWriter<AuthenticateReply, AuthenticateRequest>* server) override;
+    grpc::Status snapshot(grpc::ServerContext* context,
+                          grpc::ServerReaderWriter<SnapshotReply, SnapshotRequest>* server) override;
+    grpc::Status restore(grpc::ServerContext* context,
+                         grpc::ServerReaderWriter<RestoreReply, RestoreRequest>* server) override;
 };
 } // namespace multipass
 #endif // MULTIPASS_DAEMON_RPC_H
