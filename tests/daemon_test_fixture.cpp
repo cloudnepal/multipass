@@ -471,8 +471,8 @@ std::string mpt::DaemonTestFixture::fake_json_contents(const std::string& defaul
         mount_element += gid_array_elements.join(',');
 
         mount_element += QString::fromStdString(fmt::format("\n                ],\n"
-                                                            "                \"source_path\": \"{}\",\n"
-                                                            "                \"target_path\": \"{}\",\n",
+                                                            "                \"source_path\": {:?},\n"
+                                                            "                \"target_path\": {:?},\n",
                                                             mount.get_source_path(),
                                                             mountpoint));
         mount_element += QString::fromStdString(fmt::format("                \"mount_type\": {},\n"
@@ -680,3 +680,17 @@ template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
                          std::promise<grpc::Status>*),
     const mp::RestoreRequest&,
     StrictMock<mpt::MockServerReaderWriter<mp::RestoreReply, mp::RestoreRequest>>&&);
+template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
+    mp::Daemon&,
+    void (mp::Daemon::*)(const mp::CloneRequest*,
+                         grpc::ServerReaderWriterInterface<mp::CloneReply, mp::CloneRequest>*,
+                         std::promise<grpc::Status>*),
+    const mp::CloneRequest&,
+    NiceMock<mpt::MockServerReaderWriter<mp::CloneReply, mp::CloneRequest>>&);
+template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
+    mp::Daemon&,
+    void (mp::Daemon::*)(const mp::CloneRequest*,
+                         grpc::ServerReaderWriterInterface<mp::CloneReply, mp::CloneRequest>*,
+                         std::promise<grpc::Status>*),
+    const mp::CloneRequest&,
+    NiceMock<mpt::MockServerReaderWriter<mp::CloneReply, mp::CloneRequest>>&&);

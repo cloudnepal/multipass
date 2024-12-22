@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
+import 'package:local_notifier/local_notifier.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -15,30 +16,38 @@ import 'settings/hotkey.dart';
 import 'settings/settings.dart';
 import 'sidebar.dart';
 import 'tray_menu.dart';
+import 'vm_details/mapping_slider.dart';
 import 'vm_details/vm_details.dart';
 import 'vm_table/vm_table_screen.dart';
+import 'window_size.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await setupLogger();
 
+  await localNotifier.setup(
+    appName: 'Multipass',
+    shortcutPolicy: ShortcutPolicy.requireCreate, // Only for Windows
+  );
+
+  final sharedPreferences = await SharedPreferences.getInstance();
   await windowManager.ensureInitialized();
-  const windowOptions = WindowOptions(
+  final windowOptions = WindowOptions(
     center: true,
-    minimumSize: Size(1000, 600),
-    size: Size(1400, 822),
+    minimumSize: const Size(750, 450),
+    size: await deriveWindowSize(sharedPreferences),
     title: 'Multipass',
   );
+
   await windowManager.waitUntilReadyToShow(windowOptions, () async {
     await windowManager.show();
     await windowManager.focus();
   });
 
   await hotKeyManager.unregisterAll();
-  final sharedPreferences = await SharedPreferences.getInstance();
 
-  final providerContainer = ProviderContainer(overrides: [
+  providerContainer = ProviderContainer(overrides: [
     guiSettingProvider.overrideWith(() {
       return GuiSettingNotifier(sharedPreferences);
     }),
@@ -118,7 +127,7 @@ class _AppState extends ConsumerState<App> with WindowListener {
       ),
       const Align(
         alignment: Alignment.bottomRight,
-        child: SizedBox(width: 300, child: NotificationList()),
+        child: SizedBox(width: 400, child: NotificationList()),
       ),
       const DaemonUnavailable(),
     ]);
@@ -129,7 +138,7 @@ class _AppState extends ConsumerState<App> with WindowListener {
     final primary = ref.read(clientSettingProvider(primaryNameKey));
     if (vms.contains(primary)) {
       ref.read(sidebarKeyProvider.notifier).set('vm-$primary');
-      windowManager.show();
+      windowManager.showAndRestore();
     }
   }
 
@@ -145,6 +154,11 @@ class _AppState extends ConsumerState<App> with WindowListener {
     windowManager.removeListener(this);
     super.dispose();
   }
+
+  // this event handler is called continuously during a window resizing operation
+  // so we want to save the data to the disk only after the resizing stops
+  @override
+  void onWindowResize() => saveWindowSizeTimer.reset();
 
   @override
   void onWindowClose() async {
@@ -200,13 +214,20 @@ class _AppState extends ConsumerState<App> with WindowListener {
 final theme = ThemeData(
   useMaterial3: false,
   fontFamily: 'Ubuntu',
+  fontFamilyFallback: ['NotoColorEmoji', 'FreeSans'],
   inputDecorationTheme: const InputDecorationTheme(
-    border: OutlineInputBorder(borderRadius: BorderRadius.zero),
-    isDense: true,
-    focusedBorder: OutlineInputBorder(
+    contentPadding: EdgeInsets.symmetric(vertical: 16, horizontal: 6),
+    fillColor: Color(0xfff2f2f2),
+    filled: true,
+    focusedBorder: UnderlineInputBorder(
+      borderSide: BorderSide(width: 2),
       borderRadius: BorderRadius.zero,
-      borderSide: BorderSide(),
     ),
+    enabledBorder: UnderlineInputBorder(
+      borderSide: BorderSide(width: 2),
+      borderRadius: BorderRadius.zero,
+    ),
+    isDense: true,
     suffixIconColor: Colors.black,
   ),
   outlinedButtonTheme: OutlinedButtonThemeData(
@@ -255,5 +276,15 @@ final theme = ThemeData(
       fontWeight: FontWeight.bold,
     ),
     tabAlignment: TabAlignment.start,
+  ),
+  sliderTheme: SliderThemeData(
+    activeTrackColor: Color(0xff0066cc),
+    inactiveTrackColor: Color(0xffd9d9d9),
+    overlayShape: SliderComponentShape.noThumb,
+    thumbColor: Colors.white,
+    thumbShape: CustomThumbShape(),
+    tickMarkShape: SliderTickMarkShape.noTickMark,
+    trackHeight: 2,
+    trackShape: CustomTrackShape(),
   ),
 );

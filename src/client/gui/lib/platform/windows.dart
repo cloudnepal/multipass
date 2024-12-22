@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:win32/win32.dart';
 
 import '../settings/autostart_notifiers.dart';
+import '../vm_details/terminal.dart';
 import 'platform.dart';
 
 class WindowsPlatform extends MpPlatform {
@@ -23,6 +24,9 @@ class WindowsPlatform extends MpPlatform {
   String get ffiLibraryName => 'dart_ffi.dll';
 
   @override
+  bool get showLocalUpdateNotifications => true;
+
+  @override
   bool get showToggleWindow => true;
 
   @override
@@ -31,6 +35,20 @@ class WindowsPlatform extends MpPlatform {
             CopySelectionTextIntent.copy,
         SingleActivator(LogicalKeyboardKey.keyV, control: true, shift: true):
             PasteTextIntent(SelectionChangedCause.keyboard),
+        SingleActivator(LogicalKeyboardKey.equal, control: true):
+            IncreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.equal, control: true, shift: true):
+            IncreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.add, control: true, shift: true):
+            IncreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.numpadAdd, control: true):
+            IncreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.minus, control: true):
+            DecreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.numpadSubtract, control: true):
+            DecreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.digit0, control: true):
+            ResetTerminalFontIntent(),
       };
 
   @override
@@ -38,6 +56,9 @@ class WindowsPlatform extends MpPlatform {
 
   @override
   String get metaKey => 'Win';
+
+  @override
+  String? get homeDirectory => Platform.environment['USERPROFILE'];
 }
 
 class WindowsAutostartNotifier extends AutostartNotifier {

@@ -73,6 +73,18 @@ final _memoryInBytes = _lib.lookupFunction<
     ffi.LongLong Function(ffi.Pointer<Utf8>),
     int Function(ffi.Pointer<Utf8>)>('memory_in_bytes');
 
+final _humanReadableMemory = _lib.lookupFunction<
+    ffi.Pointer<Utf8> Function(ffi.LongLong),
+    ffi.Pointer<Utf8> Function(int)>('human_readable_memory');
+
+final getTotalDiskSize =
+    _lib.lookupFunction<ffi.LongLong Function(), int Function()>(
+        'get_total_disk_size');
+
+final _defaultMountTarget = _lib.lookupFunction<
+    ffi.Pointer<Utf8> Function(ffi.Pointer<Utf8>),
+    ffi.Pointer<Utf8> Function(ffi.Pointer<Utf8>)>('default_mount_target');
+
 final class _NativeKeyCertificatePair extends ffi.Struct {
   // ignore: non_constant_identifier_names
   external ffi.Pointer<Utf8> pem_cert;
@@ -165,9 +177,13 @@ void setSetting(String key, String value) {
   }
 }
 
-int memoryInBytes(String value) {
+String humanReadableMemory(int bytes) => _humanReadableMemory(bytes).string;
+
+int? memoryInBytes(String value) {
   final result = _memoryInBytes(value.toNativeUtf8());
-  return result == -1
-      ? throw Exception('Could not convert $value to bytes')
-      : result;
+  return result == -1 ? null : result;
+}
+
+String defaultMountTarget({required String source}) {
+  return _defaultMountTarget(source.toNativeUtf8()).string;
 }

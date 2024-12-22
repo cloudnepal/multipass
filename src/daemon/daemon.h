@@ -140,6 +140,9 @@ public slots:
     virtual void authenticate(const AuthenticateRequest* request,
                               grpc::ServerReaderWriterInterface<AuthenticateReply, AuthenticateRequest>* server,
                               std::promise<grpc::Status>* status_promise);
+    virtual void clone(const CloneRequest* request,
+                       grpc::ServerReaderWriterInterface<CloneReply, CloneRequest>* server,
+                       std::promise<grpc::Status>* status_promise);
 
     virtual void snapshot(const SnapshotRequest* request,
                           grpc::ServerReaderWriterInterface<SnapshotReply, SnapshotRequest>* server,
@@ -148,6 +151,10 @@ public slots:
     virtual void restore(const RestoreRequest* request,
                          grpc::ServerReaderWriterInterface<RestoreReply, RestoreRequest>* server,
                          std::promise<grpc::Status>* status_promise);
+
+    virtual void daemon_info(const DaemonInfoRequest* request,
+                             grpc::ServerReaderWriterInterface<DaemonInfoReply, DaemonInfoRequest>* server,
+                             std::promise<grpc::Status>* status_promise);
 
 private:
     void release_resources(const std::string& instance);
@@ -203,6 +210,10 @@ private:
 
     void
     populate_instance_info(VirtualMachine& vm, InfoReply& response, bool runtime_info, bool deleted, bool& have_mounts);
+
+    std::string dest_name_for_clone(const CloneRequest& request);
+    grpc::Status validate_dest_name(const std::string& name);
+    VMSpecs clone_spec(const VMSpecs& src_vm_spec, const std::string& src_name, const std::string& dest_name);
 
     std::unique_ptr<const DaemonConfig> config;
 

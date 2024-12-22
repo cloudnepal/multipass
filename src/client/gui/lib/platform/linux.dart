@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../settings/autostart_notifiers.dart';
+import '../vm_details/terminal.dart';
 import 'platform.dart';
 
 class LinuxPlatform extends MpPlatform {
@@ -21,6 +22,9 @@ class LinuxPlatform extends MpPlatform {
   String get ffiLibraryName => 'libdart_ffi.so';
 
   @override
+  bool get showLocalUpdateNotifications => false;
+
+  @override
   bool get showToggleWindow => true;
 
   @override
@@ -29,6 +33,20 @@ class LinuxPlatform extends MpPlatform {
             CopySelectionTextIntent.copy,
         SingleActivator(LogicalKeyboardKey.keyV, control: true, shift: true):
             PasteTextIntent(SelectionChangedCause.keyboard),
+        SingleActivator(LogicalKeyboardKey.equal, control: true):
+            IncreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.equal, control: true, shift: true):
+            IncreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.add, control: true, shift: true):
+            IncreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.numpadAdd, control: true):
+            IncreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.minus, control: true):
+            DecreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.numpadSubtract, control: true):
+            DecreaseTerminalFontIntent(),
+        SingleActivator(LogicalKeyboardKey.digit0, control: true):
+            ResetTerminalFontIntent(),
       };
 
   @override
@@ -36,6 +54,11 @@ class LinuxPlatform extends MpPlatform {
 
   @override
   String get metaKey => 'Super';
+
+  @override
+  String? get homeDirectory => Platform.environment['SNAP'] == null
+      ? Platform.environment['HOME']
+      : Platform.environment['SNAP_REAL_HOME'];
 }
 
 class LinuxAutostartNotifier extends AutostartNotifier {
@@ -43,7 +66,6 @@ class LinuxAutostartNotifier extends AutostartNotifier {
   final file = File(
     '${Platform.environment['HOME']}/.config/autostart/$autostartFile',
   );
-
 
   LinuxAutostartNotifier() {
     if (FileSystemEntity.isLinkSync(file.path)) {

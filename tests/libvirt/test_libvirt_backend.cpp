@@ -76,12 +76,6 @@ TEST_F(LibVirtBackend, libvirt_wrapper_missing_libvirt_throws)
     EXPECT_THROW(mp::LibvirtWrapper{"missing_libvirt"}, mp::LibvirtOpenException);
 }
 
-TEST_F(LibVirtBackend, libvirt_wrapper_missing_symbol_throws)
-{
-    // Need to set LD_LIBRARY_PATH to this .so for the multipass_tests executable
-    EXPECT_THROW(mp::LibvirtWrapper{"libbroken_libvirt.so"}, mp::LibvirtSymbolAddressException);
-}
-
 TEST_F(LibVirtBackend, health_check_good_does_not_throw)
 {
     EXPECT_CALL(*mock_backend, check_for_kvm_support()).WillOnce(Return());
@@ -454,7 +448,7 @@ TEST_F(LibVirtBackend, shutdown_while_starting_throws_and_sets_correct_state)
 
     ASSERT_EQ(machine->state, mp::VirtualMachine::State::starting);
 
-    mp::AutoJoinThread thread = [&machine] { machine->shutdown(true); };
+    mp::AutoJoinThread thread = [&machine] { machine->shutdown(mp::VirtualMachine::ShutdownPolicy::Poweroff); };
 
     using namespace std::chrono_literals;
     while (!destroy_called)

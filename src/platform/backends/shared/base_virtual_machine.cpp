@@ -18,6 +18,7 @@
 #include "base_virtual_machine.h"
 
 #include <multipass/cloud_init_iso.h>
+#include <multipass/constants.h>
 #include <multipass/exceptions/file_open_failed_exception.h>
 #include <multipass/exceptions/internal_timeout_exception.h>
 #include <multipass/exceptions/ip_unavailable_exception.h>
@@ -32,7 +33,6 @@
 #include <multipass/ssh/ssh_session.h>
 #include <multipass/top_catch_all.h>
 #include <multipass/vm_specs.h>
-
 #include <scope_guard.hpp>
 
 #include <QDir>
@@ -160,62 +160,65 @@ void mp::BaseVirtualMachine::apply_extra_interfaces_and_instance_id_to_cloud_ini
     const std::vector<NetworkInterface>& extra_interfaces,
     const std::string& new_instance_id) const
 {
-    const std::filesystem::path cloud_init_config_iso_file_path =
-        std::filesystem::path{instance_dir.absolutePath().toStdString()} / "cloud-init-config.iso";
+    const std::filesystem::path cloud_init_path =
+        std::filesystem::path{instance_dir.absolutePath().toStdString()} / cloud_init_file_name;
 
     MP_CLOUD_INIT_FILE_OPS.update_cloud_init_with_new_extra_interfaces_and_new_id(default_mac_addr,
                                                                                   extra_interfaces,
                                                                                   new_instance_id,
-                                                                                  cloud_init_config_iso_file_path);
+                                                                                  cloud_init_path);
 }
 
 void mp::BaseVirtualMachine::add_extra_interface_to_instance_cloud_init(const std::string& default_mac_addr,
                                                                         const NetworkInterface& extra_interface) const
 {
-    const std::filesystem::path cloud_init_config_iso_file_path =
-        std::filesystem::path{instance_dir.absolutePath().toStdString()} / "cloud-init-config.iso";
+    const std::filesystem::path cloud_init_path =
+        std::filesystem::path{instance_dir.absolutePath().toStdString()} / cloud_init_file_name;
 
-    MP_CLOUD_INIT_FILE_OPS.add_extra_interface_to_cloud_init(default_mac_addr,
-                                                             extra_interface,
-                                                             cloud_init_config_iso_file_path);
+    MP_CLOUD_INIT_FILE_OPS.add_extra_interface_to_cloud_init(default_mac_addr, extra_interface, cloud_init_path);
 }
 
 std::string mp::BaseVirtualMachine::get_instance_id_from_the_cloud_init() const
 {
-    const std::filesystem::path cloud_init_config_iso_file_path =
-        std::filesystem::path{instance_dir.absolutePath().toStdString()} / "cloud-init-config.iso";
+    const std::filesystem::path cloud_init_path =
+        std::filesystem::path{instance_dir.absolutePath().toStdString()} / cloud_init_file_name;
 
-    return MP_CLOUD_INIT_FILE_OPS.get_instance_id_from_cloud_init(cloud_init_config_iso_file_path);
+    return MP_CLOUD_INIT_FILE_OPS.get_instance_id_from_cloud_init(cloud_init_path);
 }
 
-void mp::BaseVirtualMachine::check_state_for_shutdown(bool force)
+void mp::BaseVirtualMachine::check_state_for_shutdown(ShutdownPolicy shutdown_policy)
 {
-    const std::string force_statement{"Use --force to override."};
-
     // A mutex should already be locked by the caller here
     if (state == State::off || state == State::stopped)
     {
         throw VMStateIdempotentException{"Ignoring shutdown since instance is already stopped."};
     }
 
-    if (force)
+    if (shutdown_policy == ShutdownPolicy::Poweroff)
     {
         return;
     }
 
-    if (state == State::suspending)
-    {
-        throw VMStateInvalidException{fmt::format("Cannot stop instance while suspending. {}", force_statement)};
-    }
-
     if (state == State::suspended)
     {
-        throw VMStateInvalidException{fmt::format("Cannot stop suspended instance. {}", force_statement)};
+        if (shutdown_policy == ShutdownPolicy::Halt)
+        {
+            throw VMStateIdempotentException{"Ignoring shutdown since instance is already suspended."};
+        }
+        else // else only can be ShutdownPolicy::Powerdown since ShutdownPolicy::Poweroff check was preemptively done.
+        {
+            throw VMStateInvalidException{fmt::format("Cannot shut down suspended instance {}.", vm_name)};
+        }
+    }
+
+    if (state == State::suspending)
+    {
+        throw VMStateInvalidException{fmt::format("Cannot shut down instance {} while suspending.", vm_name)};
     }
 
     if (state == State::starting || state == State::restarting)
     {
-        throw VMStateInvalidException{fmt::format("Cannot stop instance while starting. {}", force_statement)};
+        throw VMStateInvalidException{fmt::format("Cannot shut down instance {} while starting.", vm_name)};
     }
 }
 
@@ -646,9 +649,9 @@ void mp::BaseVirtualMachine::log_latest_snapshot(LockT lock) const
 
 void mp::BaseVirtualMachine::load_snapshot(const QString& filename)
 {
-    auto snapshot = make_specific_snapshot(filename);
+    const auto snapshot = make_specific_snapshot(filename);
     const auto& name = snapshot->get_name();
-    auto [it, success] = snapshots.try_emplace(name, snapshot);
+    const auto [_, success] = snapshots.try_emplace(name, snapshot);
 
     if (!success)
     {

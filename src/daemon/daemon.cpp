@@ -22,6 +22,7 @@
 #include "snapshot_settings_handler.h"
 
 #include <multipass/alias_definition.h>
+#include <multipass/cloud_init_iso.h>
 #include <multipass/constants.h>
 #include <multipass/exceptions/blueprint_exceptions.h>
 #include <multipass/exceptions/create_image_exception.h>
@@ -32,6 +33,7 @@
 #include <multipass/exceptions/snapshot_exceptions.h>
 #include <multipass/exceptions/sshfs_missing_error.h>
 #include <multipass/exceptions/start_exception.h>
+#include <multipass/exceptions/virtual_machine_state_exceptions.h>
 #include <multipass/ip_address.h>
 #include <multipass/json_utils.h>
 #include <multipass/logging/client_logger.h>
@@ -65,6 +67,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QStorageInfo>
 #include <QString>
 #include <QSysInfo>
 #include <QtConcurrent/QtConcurrent>
@@ -251,6 +254,7 @@ std::unordered_map<std::string, mp::VMSpecs> load_db(const mp::Path& data_path, 
         auto state = record["state"].toInt();
         auto deleted = record["deleted"].toBool();
         auto metadata = record["metadata"].toObject();
+        auto clone_count = record["clone_count"].toInt();
 
         if (!num_cores && !deleted && ssh_username.empty() && metadata.isEmpty() &&
             !mp::MemorySize{mem_size}.in_bytes() && !mp::MemorySize{disk_space}.in_bytes())
@@ -287,7 +291,8 @@ std::unordered_map<std::string, mp::VMSpecs> load_db(const mp::Path& data_path, 
             static_cast<mp::VirtualMachine::State>(state),
             mounts,
             deleted,
-            metadata};
+            metadata,
+            clone_count};
     }
     return reconstructed_records;
 }
@@ -317,8 +322,14 @@ QJsonObject vm_spec_to_json(const mp::VMSpecs& specs)
     }
 
     json.insert("mounts", json_mounts);
+    json.insert("clone_count", specs.clone_count);
 
     return json;
+}
+
+std::string generate_next_clone_name(int clone_count, const std::string& source_name)
+{
+    return fmt::format("{}-clone{}", source_name, clone_count + 1);
 }
 
 auto fetch_image_for(const std::string& name, mp::VirtualMachineFactory& factory, mp::VMImageVault& vault)
@@ -549,6 +560,7 @@ auto connect_rpc(mp::DaemonRpc& rpc, mp::Daemon& daemon)
     QObject::connect(&rpc, &mp::DaemonRpc::on_find, &daemon, &mp::Daemon::find);
     QObject::connect(&rpc, &mp::DaemonRpc::on_info, &daemon, &mp::Daemon::info);
     QObject::connect(&rpc, &mp::DaemonRpc::on_list, &daemon, &mp::Daemon::list);
+    QObject::connect(&rpc, &mp::DaemonRpc::on_clone, &daemon, &mp::Daemon::clone);
     QObject::connect(&rpc, &mp::DaemonRpc::on_networks, &daemon, &mp::Daemon::networks);
     QObject::connect(&rpc, &mp::DaemonRpc::on_mount, &daemon, &mp::Daemon::mount);
     QObject::connect(&rpc, &mp::DaemonRpc::on_recover, &daemon, &mp::Daemon::recover);
@@ -566,6 +578,7 @@ auto connect_rpc(mp::DaemonRpc& rpc, mp::Daemon& daemon)
     QObject::connect(&rpc, &mp::DaemonRpc::on_authenticate, &daemon, &mp::Daemon::authenticate);
     QObject::connect(&rpc, &mp::DaemonRpc::on_snapshot, &daemon, &mp::Daemon::snapshot);
     QObject::connect(&rpc, &mp::DaemonRpc::on_restore, &daemon, &mp::Daemon::restore);
+    QObject::connect(&rpc, &mp::DaemonRpc::on_daemon_info, &daemon, &mp::Daemon::daemon_info);
 }
 
 enum class InstanceGroup
@@ -1338,7 +1351,7 @@ mp::Daemon::Daemon(std::unique_ptr<const DaemonConfig> the_config)
         }
 
         const auto instance_dir = mp::utils::base_dir(vm_image.image_path);
-        const auto cloud_init_iso = instance_dir.filePath("cloud-init-config.iso");
+        const auto cloud_init_iso = instance_dir.filePath(cloud_init_file_name);
         mp::VirtualMachineDescription vm_desc{spec.num_cores,
                                               spec.mem_size,
                                               spec.disk_space,
@@ -1394,6 +1407,7 @@ mp::Daemon::Daemon(std::unique_ptr<const DaemonConfig> the_config)
     {
         mpl::log(mpl::Level::warning, category, fmt::format("Removing invalid instance: {}", bad_spec));
         vm_instance_specs.erase(bad_spec);
+        config->vault->remove(bad_spec);
     }
 
     if (!invalid_specs.empty())
@@ -1665,6 +1679,7 @@ try // clang-format on
     mpl::ClientLogger<InfoReply, InfoRequest> logger{mpl::level_from(request->verbosity_level()), *config->logger,
                                                      server};
     InfoReply response;
+    config->update_prompt->populate_if_time_to_show(response.mutable_update_info());
     InstanceSnapshotsMap instance_snapshots_map;
     bool have_mounts = false;
     bool deleted = false;
@@ -1893,11 +1908,11 @@ try // clang-format on
                                                        server};
 
     if (!MP_SETTINGS.get_as<bool>(mp::mounts_key))
-        return status_promise->set_value(
-            grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                         "Mounts are disabled on this installation of Multipass.\n\n"
-                         "See https://multipass.run/docs/set-command#local.privileged-mounts for information\n"
-                         "on how to enable them."));
+        return status_promise->set_value(grpc::Status(
+            grpc::StatusCode::FAILED_PRECONDITION,
+            "Mounts are disabled on this installation of Multipass.\n\n"
+            "See https://canonical.com/multipass/docs/set-command#local.privileged-mounts for information\n"
+            "on how to enable them."));
 
     mp::id_mappings uid_mappings, gid_mappings;
     for (const auto& map : request->mount_maps().uid_mappings())
@@ -1910,7 +1925,10 @@ try // clang-format on
     for (const auto& path_entry : request->target_paths())
     {
         const auto& name = path_entry.instance_name();
-        const auto target_path = QDir::cleanPath(QString::fromStdString(path_entry.target_path())).toStdString();
+        const auto q_target_path = path_entry.target_path().empty()
+                                       ? MP_UTILS.default_mount_target(QString::fromStdString(request->source_path()))
+                                       : QDir::cleanPath(QString::fromStdString(path_entry.target_path()));
+        const auto target_path = q_target_path.toStdString();
 
         auto it = operative_instances.find(name);
         if (it == operative_instances.end())
@@ -1920,7 +1938,7 @@ try // clang-format on
         }
         auto& vm = it->second;
 
-        if (mp::utils::invalid_target_path(QString::fromStdString(target_path)))
+        if (mp::utils::invalid_target_path(q_target_path))
         {
             add_fmt_to(errors, "unable to mount to \"{}\"", target_path);
             continue;
@@ -2070,13 +2088,15 @@ try // clang-format on
         {
         case VirtualMachine::State::unknown:
         {
-            auto error_string = fmt::format("Instance \'{}\' is already running, but in an unknown state", name);
+            auto error_string = fmt::format("Instance '{0}' is already running, but in an unknown state.\n"
+                                            "Try to stop it first.",
+                                            name);
             mpl::log(mpl::Level::warning, category, error_string);
             fmt::format_to(std::back_inserter(start_errors), error_string);
             continue;
         }
         case VirtualMachine::State::suspending:
-            fmt::format_to(std::back_inserter(start_errors), "Cannot start the instance \'{}\' while suspending", name);
+            fmt::format_to(std::back_inserter(start_errors), "Cannot start the instance '{}' while suspending.", name);
             continue;
         case VirtualMachine::State::delayed_shutdown:
             delayed_shutdown_instances.erase(name);
@@ -2145,9 +2165,13 @@ try // clang-format on
 
     status_promise->set_value(status);
 }
+catch (const mp::VMStateInvalidException& e)
+{
+    status_promise->set_value(grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, e.what()});
+}
 catch (const std::exception& e)
 {
-    status_promise->set_value(grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what(), ""));
+    status_promise->set_value(grpc::Status(grpc::StatusCode::INTERNAL, e.what()));
 }
 
 void mp::Daemon::suspend(const SuspendRequest* request,
@@ -2294,9 +2318,13 @@ try // clang-format on
     server->Write(response);
     status_promise->set_value(status);
 }
+catch (const mp::VMStateInvalidException& e)
+{
+    status_promise->set_value(grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, e.what()});
+}
 catch (const std::exception& e)
 {
-    status_promise->set_value(grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what(), ""));
+    status_promise->set_value(grpc::Status(grpc::StatusCode::INTERNAL, e.what()));
 }
 
 void mp::Daemon::umount(const UmountRequest* request,
@@ -2470,6 +2498,10 @@ catch (const mp::UnrecognizedSettingException& e)
 {
     status_promise->set_value(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what(), ""));
 }
+catch (const mp::InstanceStateSettingsException& e)
+{
+    status_promise->set_value(grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what(), ""));
+}
 catch (const mp::InvalidSettingException& e)
 {
     status_promise->set_value(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what(), ""));
@@ -2558,7 +2590,7 @@ try
         using St = VirtualMachine::State;
         if (auto state = vm_ptr->current_state(); state != St::off && state != St::stopped)
             return status_promise->set_value(
-                grpc::Status{grpc::INVALID_ARGUMENT, "Multipass can only take snapshots of stopped instances."});
+                grpc::Status{grpc::FAILED_PRECONDITION, "Multipass can only take snapshots of stopped instances."});
 
         auto snapshot_name = request->snapshot();
         if (!snapshot_name.empty() && !mp::utils::valid_hostname(snapshot_name))
@@ -2613,7 +2645,7 @@ try
         using St = VirtualMachine::State;
         if (auto state = vm_ptr->current_state(); state != St::off && state != St::stopped)
             return status_promise->set_value(
-                grpc::Status{grpc::INVALID_ARGUMENT, "Multipass can only restore snapshots of stopped instances."});
+                grpc::Status{grpc::FAILED_PRECONDITION, "Multipass can only restore snapshots of stopped instances."});
 
         auto spec_it = vm_instance_specs.find(instance_name);
         assert(spec_it != vm_instance_specs.end() && "missing instance specs");
@@ -2668,6 +2700,103 @@ catch (const std::exception& e)
     status_promise->set_value(grpc::Status(grpc::StatusCode::INTERNAL, e.what(), ""));
 }
 
+void mp::Daemon::clone(const CloneRequest* request,
+                       grpc::ServerReaderWriterInterface<CloneReply, CloneRequest>* server,
+                       std::promise<grpc::Status>* status_promise)
+try
+{
+    config->factory->require_clone_support();
+    mpl::ClientLogger<CloneReply, CloneRequest> logger{mpl::level_from(request->verbosity_level()),
+                                                       *config->logger,
+                                                       server};
+
+    const auto& source_name = request->source_name();
+    const auto [src_instance_trail, src_vm_status] = find_instance_and_react(operative_instances,
+                                                                             deleted_instances,
+                                                                             source_name,
+                                                                             require_operative_instances_reaction);
+    if (src_vm_status.ok())
+    {
+        assert(src_instance_trail.index() == 0);
+        const auto source_vm_ptr = std::get<0>(src_instance_trail)->second;
+        assert(source_vm_ptr);
+        const VirtualMachine::State source_vm_state = source_vm_ptr->current_state();
+        if (source_vm_state != VirtualMachine::State::stopped && source_vm_state != VirtualMachine::State::off)
+        {
+            return status_promise->set_value(
+                grpc::Status{grpc::FAILED_PRECONDITION, "Multipass can only clone stopped instances."});
+        }
+
+        const std::string destination_name = dest_name_for_clone(*request);
+        if (auto dest_vm_status = validate_dest_name(destination_name); !dest_vm_status.ok())
+            return status_promise->set_value(std::move(dest_vm_status));
+
+        auto rollback_resources = sg::make_scope_guard([this, destination_name]() noexcept -> void {
+            top_catch_all(category, [this, destination_name]() {
+                release_resources(destination_name);
+                preparing_instances.erase(destination_name);
+            });
+        });
+
+        // signal that the new instance is being cooked up
+        preparing_instances.insert(destination_name);
+        auto& src_spec = vm_instance_specs[source_name];
+        auto dest_spec = clone_spec(src_spec, source_name, destination_name);
+
+        config->vault->clone(source_name, destination_name);
+
+        const mp::VMImage dest_vm_image = fetch_image_for(destination_name, *config->factory, *config->vault);
+
+        // Specs need to be in place before the factory can create the VM
+        // Notice that we are passing `this`, which can be used to retrieve further info
+        vm_instance_specs.emplace(destination_name, dest_spec);
+        operative_instances[destination_name] = config->factory->clone_bare_vm(src_spec,
+                                                                               dest_spec,
+                                                                               source_name,
+                                                                               destination_name,
+                                                                               dest_vm_image,
+                                                                               *config->ssh_key_provider,
+                                                                               *this);
+        ++src_spec.clone_count;
+        // preparing instance is done
+        preparing_instances.erase(destination_name);
+        persist_instances();
+        init_mounts(destination_name);
+
+        CloneReply rpc_response;
+        rpc_response.set_reply_message(fmt::format("Cloned from {} to {}.\n", source_name, destination_name));
+        server->Write(rpc_response);
+        rollback_resources.dismiss();
+    }
+    status_promise->set_value(src_vm_status);
+}
+catch (const std::exception& e)
+{
+    status_promise->set_value(grpc::Status(grpc::StatusCode::INTERNAL, e.what()));
+}
+
+void mp::Daemon::daemon_info(const DaemonInfoRequest* request,
+                             grpc::ServerReaderWriterInterface<DaemonInfoReply, DaemonInfoRequest>* server,
+                             std::promise<grpc::Status>* status_promise) // clang-format off
+try // clang-format on
+{
+    mpl::ClientLogger<DaemonInfoReply, DaemonInfoRequest> logger{mpl::level_from(request->verbosity_level()),
+                                                                 *config->logger,
+                                                                 server};
+
+    DaemonInfoReply response;
+
+    QStorageInfo storage_info{config->data_directory};
+    response.set_available_space(storage_info.bytesTotal());
+
+    server->Write(response);
+    status_promise->set_value(grpc::Status{});
+}
+catch (const std::exception& e)
+{
+    status_promise->set_value(grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what(), ""));
+}
+
 void mp::Daemon::on_shutdown()
 {
 }
@@ -2684,10 +2813,18 @@ void mp::Daemon::on_restart(const std::string& name)
 {
     stop_mounts(name);
     auto future_watcher = create_future_watcher([this, &name]() {
-        auto virtual_machine = operative_instances[name];
-        std::lock_guard<decltype(virtual_machine->state_mutex)> lock{virtual_machine->state_mutex};
-        virtual_machine->state = VirtualMachine::State::running;
-        virtual_machine->update_state();
+        try
+        {
+            auto virtual_machine = operative_instances.at(name);
+
+            std::lock_guard<decltype(virtual_machine->state_mutex)> lock{virtual_machine->state_mutex};
+            virtual_machine->state = VirtualMachine::State::running;
+            virtual_machine->update_state();
+        }
+        catch (const std::out_of_range&)
+        {
+            // logging is dangerous since this thread is probably in a corrupt state
+        }
     });
     future_watcher->setFuture(QtConcurrent::run(&Daemon::async_wait_for_ready_all<StartReply, StartRequest>,
                                                 this,
@@ -2882,10 +3019,13 @@ void mp::Daemon::create_vm(const CreateRequest* request,
             }
             catch (const std::exception& e)
             {
-                preparing_instances.erase(name);
-                release_resources(name);
-                operative_instances.erase(name);
-                persist_instances();
+                mp::top_catch_all(category, [this, &name]() {
+                    preparing_instances.erase(name);
+                    release_resources(name);
+                    operative_instances.erase(name);
+                    persist_instances();
+                });
+
                 status_promise->set_value(grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what(), ""));
             }
 
@@ -3074,8 +3214,9 @@ bool mp::Daemon::delete_vm(InstanceTable::iterator vm_it, bool purge, DeleteRepl
             delayed_shutdown_instances.erase(name);
 
         mounts[name].clear();
-        instance->shutdown(purge);
 
+        instance->shutdown(purge == true ? VirtualMachine::ShutdownPolicy::Poweroff
+                                         : VirtualMachine::ShutdownPolicy::Halt);
         if (!purge)
         {
             vm_instance_specs[name].deleted = true;
@@ -3109,8 +3250,11 @@ grpc::Status mp::Daemon::reboot_vm(VirtualMachine& vm)
         delayed_shutdown_instances.erase(vm.vm_name);
 
     if (!MP_UTILS.is_running(vm.current_state()))
-        return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
-                            fmt::format("instance \"{}\" is not running", vm.vm_name), ""};
+        return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                            fmt::format("Instance '{0}' is already running, but in an unknown state.\n"
+                                        "Try to stop and start it instead.",
+                                        vm.vm_name),
+                            ""};
 
     mpl::log(mpl::Level::debug, category, fmt::format("Rebooting {}", vm.vm_name));
     return ssh_reboot(vm);
@@ -3119,28 +3263,17 @@ grpc::Status mp::Daemon::reboot_vm(VirtualMachine& vm)
 grpc::Status mp::Daemon::shutdown_vm(VirtualMachine& vm, const std::chrono::milliseconds delay)
 {
     const auto& name = vm.vm_name;
-    const auto& current_state = vm.current_state();
+    delayed_shutdown_instances.erase(name);
 
-    using St = VirtualMachine::State;
-    const auto skip_states = {St::off, St::stopped, St::suspended};
+    auto stop_all_mounts = [this](const std::string& name) { stop_mounts(name); };
+    auto& shutdown_timer = delayed_shutdown_instances[name] =
+        std::make_unique<DelayedShutdownTimer>(&vm, stop_all_mounts);
 
-    if (std::none_of(cbegin(skip_states), cend(skip_states), [&current_state](const auto& skip_state) {
-            return current_state == skip_state;
-        }))
-    {
+    QObject::connect(shutdown_timer.get(), &DelayedShutdownTimer::finished, [this, name]() {
         delayed_shutdown_instances.erase(name);
+    });
 
-        auto stop_all_mounts = [this](const std::string& name) { stop_mounts(name); };
-        auto& shutdown_timer = delayed_shutdown_instances[name] =
-            std::make_unique<DelayedShutdownTimer>(&vm, stop_all_mounts);
-
-        QObject::connect(shutdown_timer.get(), &DelayedShutdownTimer::finished,
-                         [this, name]() { delayed_shutdown_instances.erase(name); });
-
-        shutdown_timer->start(delay);
-    }
-    else
-        mpl::log(mpl::Level::debug, category, fmt::format("instance \"{}\" does not need stopping", name));
+    shutdown_timer->start(delay);
 
     return grpc::Status::OK;
 }
@@ -3148,21 +3281,9 @@ grpc::Status mp::Daemon::shutdown_vm(VirtualMachine& vm, const std::chrono::mill
 grpc::Status mp::Daemon::switch_off_vm(VirtualMachine& vm)
 {
     const auto& name = vm.vm_name;
-    const auto& current_state = vm.current_state();
+    delayed_shutdown_instances.erase(name);
 
-    using St = VirtualMachine::State;
-    const auto skip_states = {St::off, St::stopped};
-
-    if (std::none_of(cbegin(skip_states), cend(skip_states), [&current_state](const auto& skip_state) {
-            return current_state == skip_state;
-        }))
-    {
-        delayed_shutdown_instances.erase(name);
-
-        vm.shutdown(true);
-    }
-    else
-        mpl::log(mpl::Level::debug, category, fmt::format("instance \"{}\" does not need stopping", name));
+    vm.shutdown(VirtualMachine::ShutdownPolicy::Poweroff);
 
     return grpc::Status::OK;
 }
@@ -3417,25 +3538,19 @@ mp::Daemon::async_wait_for_ready_all(grpc::ServerReaderWriterInterface<Reply, Re
         if (auto error = future.result(); !error.empty())
             add_fmt_to(errors, error);
 
-    if (server && std::is_same<Reply, StartReply>::value)
+    if constexpr (std::is_same_v<Reply, StartReply> || std::is_same_v<Reply, RestartReply>)
     {
-        bool write_reply{false};
-        Reply reply;
-
-        if (config->update_prompt->is_time_to_show())
+        if (server)
         {
-            config->update_prompt->populate(reply.mutable_update_info());
-            write_reply = true;
-        }
+            Reply reply;
 
-        if (warnings.size() > 0)
-        {
-            reply.set_log_line(fmt::to_string(warnings));
-            write_reply = true;
-        }
+            config->update_prompt->populate_if_time_to_show(reply.mutable_update_info());
 
-        if (write_reply)
-        {
+            if (warnings.size() > 0)
+            {
+                reply.set_log_line(fmt::to_string(warnings));
+            }
+
             server->Write(reply);
         }
     }
@@ -3553,6 +3668,70 @@ void mp::Daemon::populate_instance_info(VirtualMachine& vm,
                                                          instance_info,
                                                          original_release,
                                                          vm_specs.num_cores != 1);
+}
+
+std::string mp::Daemon::dest_name_for_clone(const CloneRequest& request)
+{
+    return request.has_destination_name()
+               ? request.destination_name()
+               : generate_next_clone_name(vm_instance_specs.at(request.source_name()).clone_count,
+                                          request.source_name());
+};
+
+grpc::Status mp::Daemon::validate_dest_name(const std::string& name)
+{
+    if (!mp::utils::valid_hostname(name))
+    {
+        return grpc::Status{grpc::INVALID_ARGUMENT, "Invalid destination instance name: " + name};
+    }
+
+    const auto [dest_instance_trail, dest_vm_status] =
+        find_instance_and_react(operative_instances, deleted_instances, name, require_missing_instances_reaction);
+    assert(dest_vm_status.ok() == (dest_instance_trail.index() == 2));
+
+    if (!dest_vm_status.ok())
+    {
+        return dest_vm_status;
+    }
+    if (preparing_instances.find(name) != preparing_instances.end())
+    {
+        return grpc::Status{grpc::StatusCode::INVALID_ARGUMENT,
+                            fmt::format("instance \"{}\" is being prepared", name),
+                            ""};
+    }
+
+    return dest_vm_status;
+}
+
+mp::VMSpecs mp::Daemon::clone_spec(const VMSpecs& src_vm_spec,
+                                   const std::string& src_name,
+                                   const std::string& dest_name)
+{
+    mp::VMSpecs dest_vm_spec{src_vm_spec};
+    dest_vm_spec.clone_count = 0;
+
+    // update default mac addr and extra_interface mac addr
+    dest_vm_spec.default_mac_address = generate_unused_mac_address(allocated_mac_addrs);
+    for (auto& extra_interface : dest_vm_spec.extra_interfaces)
+    {
+        if (!extra_interface.mac_address.empty())
+        {
+            extra_interface.mac_address = generate_unused_mac_address(allocated_mac_addrs);
+        }
+    }
+
+    // non qemu snapshot files do not have metadata
+    if (!dest_vm_spec.metadata.isEmpty())
+    {
+        dest_vm_spec.metadata = MP_JSONUTILS
+                                    .update_unique_identifiers_of_metadata(QJsonValue{dest_vm_spec.metadata},
+                                                                           src_vm_spec,
+                                                                           dest_vm_spec,
+                                                                           src_name,
+                                                                           dest_name)
+                                    .toObject();
+    }
+    return dest_vm_spec;
 }
 
 bool mp::Daemon::is_bridged(const std::string& instance_name) const

@@ -19,9 +19,11 @@
 #include "multipass/platform.h"
 
 #include <multipass/cloud_init_iso.h>
+#include <multipass/constants.h>
 #include <multipass/network_interface.h>
 #include <multipass/network_interface_info.h>
 #include <multipass/virtual_machine_description.h>
+#include <multipass/vm_specs.h>
 #include <multipass/yaml_node_utils.h>
 
 namespace mp = multipass;
@@ -34,7 +36,7 @@ mp::BaseVirtualMachineFactory::BaseVirtualMachineFactory(const Path& instances_d
 void mp::BaseVirtualMachineFactory::configure(VirtualMachineDescription& vm_desc)
 {
     auto instance_dir{mpu::base_dir(vm_desc.image.image_path)};
-    const auto cloud_init_iso = instance_dir.filePath("cloud-init-config.iso");
+    const auto cloud_init_iso = instance_dir.filePath(cloud_init_file_name);
 
     if (!QFile::exists(cloud_init_iso))
     {
@@ -78,6 +80,64 @@ void mp::BaseVirtualMachineFactory::prepare_interface(NetworkInterface& net,
         {
             net.id = create_bridge_with(*net_it);
             host_nets.push_back({net.id, bridge_type, "new bridge", {net_it->id}});
+        }
+    }
+}
+
+mp::VirtualMachine::UPtr mp::BaseVirtualMachineFactory::clone_bare_vm(const VMSpecs& src_spec,
+                                                                      const VMSpecs& dest_spec,
+                                                                      const std::string& src_name,
+                                                                      const std::string& dest_name,
+                                                                      const VMImage& dest_image,
+                                                                      const multipass::SSHKeyProvider& key_provider,
+                                                                      VMStatusMonitor& monitor)
+{
+    const std::filesystem::path src_instance_dir{get_instance_directory(src_name).toStdString()};
+    const std::filesystem::path dest_instance_dir{get_instance_directory(dest_name).toStdString()};
+
+    copy_instance_dir_with_essential_files(src_instance_dir, dest_instance_dir);
+
+    const fs::path cloud_init_path = dest_instance_dir / cloud_init_file_name;
+
+    MP_CLOUD_INIT_FILE_OPS.update_identifiers(dest_spec.default_mac_address,
+                                              dest_spec.extra_interfaces,
+                                              dest_name,
+                                              cloud_init_path);
+
+    // start to construct VirtualMachineDescription
+    mp::VirtualMachineDescription dest_vm_desc{dest_spec.num_cores,
+                                               dest_spec.mem_size,
+                                               dest_spec.disk_space,
+                                               dest_name,
+                                               dest_spec.default_mac_address,
+                                               dest_spec.extra_interfaces,
+                                               dest_spec.ssh_username,
+                                               dest_image,
+                                               cloud_init_path.string().c_str(),
+                                               {},
+                                               {},
+                                               {},
+                                               {}};
+
+    mp::VirtualMachine::UPtr cloned_instance = clone_vm_impl(src_name, src_spec, dest_vm_desc, monitor, key_provider);
+
+    return cloned_instance;
+}
+
+void mp::BaseVirtualMachineFactory::copy_instance_dir_with_essential_files(const fs::path& source_instance_dir_path,
+                                                                           const fs::path& dest_instance_dir_path)
+{
+    assert(fs::exists(source_instance_dir_path) && fs::is_directory(source_instance_dir_path));
+
+    fs::create_directory(dest_instance_dir_path);
+    for (const auto& entry : fs::directory_iterator(source_instance_dir_path))
+    {
+        // snapshot files are intentionally skipped; .iso file is included for all, .img file here is not relevant
+        // for non-qemu backends.
+        if (entry.path().extension().string() == ".iso" || entry.path().extension().string() == ".img")
+        {
+            const fs::path dest_file_path = dest_instance_dir_path / entry.path().filename();
+            fs::copy(entry.path(), dest_file_path, fs::copy_options::update_existing);
         }
     }
 }

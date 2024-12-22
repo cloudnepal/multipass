@@ -63,7 +63,7 @@ public:
     std::unique_ptr<MountHandler> make_native_mount_handler(const std::string& target, const VMMount& mount) override
     {
         throw NotImplementedOnThisBackendException("native mounts");
-    };
+    }
 
     SnapshotVista view_snapshots() const override;
     int get_num_snapshots() const override;
@@ -104,7 +104,7 @@ protected:
         const std::string& new_instance_id) const;
     virtual std::string get_instance_id_from_the_cloud_init() const;
 
-    virtual void check_state_for_shutdown(bool force);
+    virtual void check_state_for_shutdown(ShutdownPolicy shutdown_policy);
 
 private:
     using SnapshotMap = std::unordered_map<std::string, std::shared_ptr<Snapshot>>;
@@ -156,7 +156,7 @@ private:
     std::optional<SSHSession> ssh_session = std::nullopt;
     SnapshotMap snapshots;
     std::shared_ptr<Snapshot> head_snapshot = nullptr;
-    int snapshot_count = 0; // tracks the number of snapshots ever taken (regardless or deletes)
+    int snapshot_count = 0; // tracks the number of snapshots ever taken (regardless of deletes)
     mutable std::recursive_mutex snapshot_mutex;
 };
 
